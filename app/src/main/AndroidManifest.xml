@@ -37,6 +37,11 @@
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
+    <queries>
+        <package android:name="com.termux" />
+        <package android:name="dev.nelsen.dexpano" />
+    </queries>
+
     <application
         android:name=".app.TermuxApplication"
         android:allowBackup="false"
@@ -73,6 +78,13 @@
                 android:name="android.app.shortcuts"
                 android:resource="@xml/shortcuts" />
         </activity>
+
+        <activity
+            android:name="com.termux.app.EnvironmentImportActivity"
+            android:exported="true"
+            android:label="Import environment"
+            android:configChanges="orientation|screenSize|keyboardHidden|density"
+            android:theme="@style/Theme.TermuxActivity.DayNight.NoActionBar" />
 
         <activity-alias
             android:name=".HomeActivity"
@@ -156,6 +168,12 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity-alias>
+
+        <provider
+            android:name="com.termux.app.clipboard.KittyClipboardProvider"
+            android:authorities="${TERMUX_PACKAGE_NAME}.clipboard"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <provider
             android:name=".filepicker.TermuxDocumentsProvider"

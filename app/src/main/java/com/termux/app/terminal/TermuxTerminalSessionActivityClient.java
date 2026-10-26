@@ -21,6 +21,7 @@ import com.termux.shared.interact.ShareUtils;
 import com.termux.shared.termux.shell.command.runner.terminal.TermuxSession;
 import com.termux.shared.termux.interact.TextInputDialogUtils;
 import com.termux.app.TermuxActivity;
+import com.termux.app.clipboard.KittyClipboard;
 import com.termux.shared.termux.terminal.TermuxTerminalSessionClientBase;
 import com.termux.shared.termux.TermuxConstants;
 import com.termux.app.TermuxService;
@@ -41,6 +42,7 @@ import java.util.Properties;
 public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionClientBase {
 
     private final TermuxActivity mActivity;
+    public final KittyClipboard mKittyClipboard;
 
     private static final int MAX_SESSIONS = 8;
 
@@ -52,6 +54,7 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
 
     public TermuxTerminalSessionActivityClient(TermuxActivity activity) {
         this.mActivity = activity;
+        this.mKittyClipboard = new KittyClipboard(activity);
     }
 
     /**
@@ -145,6 +148,11 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
             return;
         }
 
+        if (service.isTermuxSessionCloseRequested(finishedSession)) {
+            removeFinishedSession(finishedSession);
+            return;
+        }
+
         int index = service.getIndexOfSession(finishedSession);
 
         // For plugin commands that expect the result back, we should immediately close the session
@@ -189,11 +197,12 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
 
     @Override
     public void onPasteTextFromClipboard(@Nullable TerminalSession session) {
-        if (!mActivity.isVisible()) return;
+        mKittyClipboard.paste(session == null ? mActivity.getCurrentSession() : session);
+    }
 
-        String text = ShareUtils.getTextStringFromClipboardIfSet(mActivity, true);
-        if (text != null)
-            mActivity.getTerminalView().mEmulator.paste(text);
+    @Override
+    public void onClipboardRequest(@NonNull TerminalSession session, String request) {
+        mKittyClipboard.handle(session, request);
     }
 
     @Override
@@ -378,7 +387,8 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
                 workingDirectory = currentSession.getCwd();
             }
 
-            TermuxSession newTermuxSession = service.createTermuxSession(null, null, null, workingDirectory, isFailSafe, sessionName);
+            TermuxSession newTermuxSession;
+            newTermuxSession = service.createTermuxSession(null, null, null, workingDirectory, isFailSafe, sessionName);
             if (newTermuxSession == null) return;
 
             TerminalSession newTerminalSession = newTermuxSession.getTerminalSession();
@@ -428,6 +438,13 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
         if (service == null) return null;
 
         return service.getTerminalSessionForHandle(sessionHandle);
+    }
+
+    /** Close the selected local session independently of its foreground program. */
+    public void closeSession(TerminalSession session) {
+        TermuxService service = mActivity.getTermuxService();
+        if (service == null || !service.requestCloseTermuxSession(session)) return;
+        if (!session.isRunning()) removeFinishedSession(session);
     }
 
     public void removeFinishedSession(TerminalSession finishedSession) {

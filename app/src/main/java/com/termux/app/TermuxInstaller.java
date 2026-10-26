@@ -28,6 +28,8 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
+import java.io.InputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -61,8 +63,28 @@ final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
 
+    private static void installKittyTerminfo(Activity activity) {
+        File target = new File(TermuxConstants.TERMUX_HOME_DIR_PATH + "/.terminfo/x/xterm-kitty");
+        if (target.isFile()) return;
+        try {
+            if (!target.getParentFile().isDirectory() && !target.getParentFile().mkdirs()) {
+                throw new IOException("Cannot create terminfo directory");
+            }
+            try (InputStream input = activity.getAssets().open("xterm-kitty.terminfo");
+                 FileOutputStream output = new FileOutputStream(target)) {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            }
+        } catch (IOException e) {
+            target.delete();
+            Logger.logError(LOG_TAG, "Installing Kitty terminfo failed: " + e.getMessage());
+        }
+    }
+
     /** Performs bootstrap setup if necessary. */
     static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
+        installKittyTerminfo(activity);
         String bootstrapErrorMessage;
         Error filesDirectoryAccessibleError;
 

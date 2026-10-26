@@ -1,6 +1,8 @@
 package com.termux.shared.shell.command.runner.app;
 
 import android.content.Context;
+import com.termux.shared.termux.shell.TermuxCompatibility;
+import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
@@ -128,7 +130,13 @@ public final class AppShell {
         // Exec the process
         final Process process;
         try {
-            process = Runtime.getRuntime().exec(commandArray, environmentArray, new File(executionCommand.workingDirectory));
+            if (shellEnvironmentClient instanceof TermuxShellEnvironment) {
+                TermuxCompatibility.Launch launch = TermuxCompatibility.prepare(commandArray[0],
+                    executionCommand.workingDirectory, commandArray, environmentArray);
+                process = Runtime.getRuntime().exec(launch.arguments, launch.environment, new File(launch.cwd));
+            } else {
+                process = Runtime.getRuntime().exec(commandArray, environmentArray, new File(executionCommand.workingDirectory));
+            }
         } catch (IOException e) {
             executionCommand.setStateFailed(Errno.ERRNO_FAILED.getCode(), currentPackageContext.getString(R.string.error_failed_to_execute_app_shell_command, executionCommand.getCommandIdAndLabelLogString()), e);
             AppShell.processAppShellResult(null, executionCommand);

@@ -4,6 +4,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.net.Uri;
 
 import com.termux.terminal.TerminalSession;
 
@@ -15,6 +16,12 @@ import com.termux.terminal.TerminalSession;
  * {@link TerminalView} through {@link TerminalView#setTerminalViewClient(TerminalViewClient)}.
  */
 public interface TerminalViewClient {
+
+    /** Rich keyboard content. Release the temporary URI grant once copying has completed. */
+    default boolean onPasteImage(TerminalSession session, Uri uri, String mime, Runnable release) {
+        release.run();
+        return false;
+    }
 
     /**
      * Callback function on scale events according to {@link ScaleGestureDetector#getScaleFactor()}.

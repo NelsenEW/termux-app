@@ -1,0 +1,12 @@
+TERMUX KITTY — STANDALONE v136
+
+OSC 5522 clipboard reads proceed without the app's permission dialog, including
+image reads requested by programs over SSH. Reads still require Kitty to be
+visible. This applies to all terminal programs while Kitty is visible.
+Explicit keyboard/paste snapshots and existing clipboard size limits are retained.
+Includes the v135 Ctrl+Shift+W session shortcut.
+
+Signed update for com.termyx. Save active terminal work, then open
+Termux-Kitty-Standalone-136.apk in My Files and choose Update.
+Android stops running Kitty sessions during replacement. Do not uninstall.
+Physical image paste must be checked after installation.

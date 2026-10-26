@@ -1,0 +1,19 @@
+TERMUX KITTY — STANDALONE v135
+
+Ctrl+Shift+W closes the currently selected local Kitty terminal session.
+Kitty handles it before encoding input for the terminal, so tmux, SSH and
+foreground applications cannot consume it. It terminates the local session's
+process and removes that session when its exit callback runs. The last session
+closes the terminal activity. Closing has no confirmation dialog.
+Holding the keys does not close additional sessions. W key release is consumed.
+The existing disable-hardware-keyboard-shortcuts setting also disables this key.
+Ctrl+Shift+V paste keeps its existing behavior.
+
+This is an update for com.termyx with the original Kitty signing certificate.
+Install Termux-Kitty-Standalone-135.apk from Samsung My Files, choosing Update.
+Save current terminal work first: Android stops the app's processes when replacing
+an APK. The update is provided for your manual installation after this Codex turn.
+
+Compile and APK identity/signature/hash checks are recorded in artifact-receipt.json.
+No automated tests or simulated close-key events are run. Physical shortcut use,
+including on Samsung DeX, must be verified after installing the update.

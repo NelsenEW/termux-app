@@ -23,6 +23,13 @@ public class TermuxApplication extends Application {
 
     public void onCreate() {
         super.onCreate();
+        try {
+            KittyNativeRuntime.ensure(this);
+            EnvironmentImportActivity.recoverTransaction();
+        } catch (Exception error) {
+            Logger.logError("TermuxImport", "Runtime or import recovery failed: " + error.getMessage());
+        }
+        KittyCleanup.removePrototypeHelpers(this);
 
         Context context = getApplicationContext();
 

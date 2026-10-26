@@ -14,6 +14,8 @@ import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalRow;
 import com.termux.terminal.TextStyle;
 import com.termux.terminal.WcWidth;
+import com.termux.terminal.KittyPlaceholder;
+import com.termux.terminal.KittyDiacritics;
 
 /**
  * Renderer of a {@link TerminalEmulator} into a {@link Canvas}.
@@ -96,6 +98,8 @@ public final class TerminalRenderer {
             boolean lastRunFontWidthMismatch = false;
             int currentCharIndex = 0;
             float measuredWidthForRun = 0.f;
+            int previousPlaceholderColor = -1;
+            int previousPlaceholderRow = -1, previousPlaceholderColumn = -1, previousPlaceholderHigh = 0;
 
             for (int column = 0; column < columns; ) {
                 final char charAtIndex = line[currentCharIndex];
@@ -103,7 +107,85 @@ public final class TerminalRenderer {
                 final int charsForCodePoint = charIsHighsurrogate ? 2 : 1;
                 final int codePoint = charIsHighsurrogate ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
                 final long style = lineObject.getStyle(column);
+                if (codePoint == KittyPlaceholder.CODE_POINT) {
+                    if (lastRunStartColumn >= 0 && column > lastRunStartColumn) {
+                        int cursorColor = lastRunInsideCursor ? palette[TextStyle.COLOR_INDEX_CURSOR] : 0;
+                        boolean invertCursor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
+                        drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn,
+                            column - lastRunStartColumn, lastRunStartIndex, currentCharIndex - lastRunStartIndex,
+                            measuredWidthForRun, cursorColor, cursorShape, lastRunStyle,
+                            reverseVideo || invertCursor || lastRunInsideSelection);
+                    }
+                    int foreground = TextStyle.decodeForeColor(style);
+                    int imageColor = (foreground & 0xff000000) == 0xff000000 ? foreground & 0xffffff
+                        : foreground < 256 ? foreground : 0;
+                    int imageRow = -1, imageColumn = -1, imageHigh = -1, diacritics = 0;
+                    currentCharIndex += charsForCodePoint;
+                    while (currentCharIndex < charsUsedInLine && WcWidth.width(line, currentCharIndex) <= 0) {
+                        int mark = Character.codePointAt(line, currentCharIndex, charsUsedInLine);
+                        int value = KittyDiacritics.index(mark);
+                        if (value >= 0) {
+                            if (diacritics == 0) imageRow = value;
+                            else if (diacritics == 1) imageColumn = value;
+                            else if (diacritics == 2) imageHigh = value;
+                            diacritics++;
+                        }
+                        currentCharIndex += Character.charCount(mark);
+                    }
+                    boolean sameImage = imageColor == previousPlaceholderColor;
+                    if (diacritics == 0 && sameImage && previousPlaceholderRow >= 0) {
+                        imageRow = previousPlaceholderRow;
+                        imageColumn = previousPlaceholderColumn + 1;
+                        imageHigh = previousPlaceholderHigh;
+                    } else if (diacritics == 1 && sameImage && imageRow == previousPlaceholderRow) {
+                        imageColumn = previousPlaceholderColumn + 1;
+                        imageHigh = previousPlaceholderHigh;
+                    } else if (diacritics == 2 && sameImage && imageRow == previousPlaceholderRow &&
+                        imageColumn == previousPlaceholderColumn + 1) {
+                        imageHigh = previousPlaceholderHigh;
+                    }
+                    if (imageColumn < 0) imageColumn = 0;
+                    if (imageHigh < 0) imageHigh = 0;
+                    float left = column * mFontWidth;
+                    float top = heightOffset - mFontLineSpacing;
+                    int background = TextStyle.decodeBackColor(style);
+                    if ((background & 0xff000000) != 0xff000000) background = palette[background];
+                    mTextPaint.setColor(background);
+                    canvas.drawRect(left, top, left + mFontWidth, top + mFontLineSpacing, mTextPaint);
+                    if (imageHigh < 256) {
+                        long imageId = ((long) imageHigh << 24) | imageColor;
+                        KittyPlaceholder placement = mEmulator.getKittyPlaceholder(imageId);
+                        if (placement != null) placement.drawCell(canvas, left, top, mFontWidth, mFontLineSpacing,
+                            imageRow, imageColumn);
+                    }
+                    previousPlaceholderColor = imageColor;
+                    previousPlaceholderRow = imageRow;
+                    previousPlaceholderColumn = imageColumn;
+                    previousPlaceholderHigh = imageHigh;
+                    column++;
+                    measuredWidthForRun = 0.f;
+                    lastRunStyle = 0;
+                    lastRunInsideCursor = lastRunInsideSelection = false;
+                    lastRunStartColumn = column;
+                    lastRunStartIndex = currentCharIndex;
+                    lastRunFontWidthMismatch = false;
+                    continue;
+                }
+                previousPlaceholderColor = -1;
+                previousPlaceholderRow = previousPlaceholderColumn = -1;
                 if (TextStyle.isTerminalBitmap(style)) {
+                    // The text run that is pending must be drawn before the bitmap, otherwise the
+                    // text before an image on the same line would never be drawn at all.
+                    if (lastRunStartColumn >= 0 && column > lastRunStartColumn) {
+                        final int columnWidthSinceLastRun = column - lastRunStartColumn;
+                        final int charsSinceLastRun = currentCharIndex - lastRunStartIndex;
+                        int cursorColor = lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0;
+                        boolean invertCursorTextColor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
+                        drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun,
+                            lastRunStartIndex, charsSinceLastRun, measuredWidthForRun,
+                            cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
+                    }
+
                     Bitmap bitmap = mEmulator.getScreen().getSixelBitmap(style);
                     if (bitmap != null) {
                         float left = column * mFontWidth;
@@ -113,13 +195,15 @@ public final class TerminalRenderer {
                         canvas.drawBitmap(bitmap, bitmapSrcRect, bitmapDestRect, null);
                     }
                     column += 1;
+                    currentCharIndex += charsForCodePoint;
+                    // The next text run starts after the cell of the bitmap, both in columns and in
+                    // the characters of the line.
                     measuredWidthForRun = 0.f;
                     lastRunStyle = 0;
                     lastRunInsideCursor = false;
-                    lastRunStartColumn = column + 1;
+                    lastRunStartColumn = column;
                     lastRunStartIndex = currentCharIndex;
                     lastRunFontWidthMismatch = false;
-                    currentCharIndex += charsForCodePoint;
                     continue;
                 }
                 final int codePointWcWidth = WcWidth.width(codePoint);

@@ -1,0 +1,38 @@
+TERMUX KITTY STANDALONE v139 — Pixel graphics compatibility
+
+Includes v138 Pano picker integration and earlier clipboard/keyboard shortcuts.
+
+Added:
+- Kitty root-frame rectangle edits: a=f,r=1, raw RGB/RGBA, overwrite X=1 and
+  straight-alpha blending X=0. Existing classic and Unicode-placeholder image
+  placements update in place. Zlib and chunked tmux passthrough are supported.
+- DEC 2026 synchronized screen-update notifications, with a one-second recovery
+  timeout for programs that omit the end marker.
+- DEC 1016 pixel mouse coordinates, DEC 1003 all-motion tracking, mouse hover,
+  and capability queries. Coordinate encoding switches back to cell SGR cleanly.
+
+Limits:
+This is not full Kitty animation support. Creating additional animation frames,
+playback (a=a), composition (a=c), and edits of PNG base images are unsupported.
+Pixel's root-frame delta renderer uses raw RGBA and does not require them.
+Pixel currently chooses full frames inside tmux unless its animation presenter
+is explicitly requested. In the remote tmux pane, start your Pixel app with:
+
+  TERMINAL_BROWSER_PRESENT=animation your-pixel-app
+
+Replace your-pixel-app with the application's real launch command. An FPS value
+cannot be promised; phone rendering, changed area, SSH and tmux all affect it.
+Pixel currently disables precise pixel mouse mode through multiplexers, so the
+phone-side implementation improves direct SSH use; tmux needs upstream work to
+preserve the same precision end to end.
+
+Installation:
+This APK is an update for com.termyx, signed with the original Kitty certificate.
+Save local terminal work, then open Termux-Kitty-Standalone-139.apk in Samsung
+My Files and choose Update. Android stops the app's local processes during
+replacement. Do not uninstall. Remote tmux servers remain on the PCs; reconnect
+after reopening the app. No remote tmux settings are changed by this update.
+
+The APK and source are in Download/Termux-Kitty/Standalone-139. The artifact
+receipt records checks and limits. Physical DeX mouse use and Pixel's visible
+frame rate still need testing on the phone after installation.

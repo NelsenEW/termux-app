@@ -17,6 +17,7 @@ import com.termux.shared.logger.Logger;
 import com.termux.shared.shell.command.environment.IShellEnvironment;
 import com.termux.shared.shell.ShellUtils;
 import com.termux.terminal.TerminalSession;
+import com.termux.shared.termux.shell.TermuxCompatibility;
 import com.termux.terminal.TerminalSessionClient;
 
 import java.io.File;
@@ -153,8 +154,10 @@ public class TermuxSession {
             Joiner.on("\n").join(environmentArray));
 
         Logger.logDebug(LOG_TAG, "Running \"" + executionCommand.getCommandIdAndLabelLogString() + "\" TermuxSession");
-        TerminalSession terminalSession = new TerminalSession(executionCommand.executable,
-            executionCommand.workingDirectory, executionCommand.arguments, environmentArray,
+        TermuxCompatibility.Launch launch = TermuxCompatibility.prepare(executionCommand.executable,
+            executionCommand.workingDirectory, executionCommand.arguments, environmentArray);
+        TerminalSession terminalSession = new TerminalSession(launch.executable,
+            launch.cwd, launch.arguments, launch.environment,
             executionCommand.terminalTranscriptRows, terminalSessionClient);
 
         if (executionCommand.shellName != null) {

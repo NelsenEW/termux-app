@@ -56,6 +56,9 @@ public final class TerminalSession extends TerminalOutput {
     /** The pid of the shell process. 0 if not started and -1 if finished running. */
     int mShellPid;
 
+    /** Imported sessions have a PRoot parent; the traced shell owns the actual cwd. */
+    private int mTracedShellPid;
+
     /** The exit status of the shell process. Only valid if ${@link #mShellPid} is -1. */
     int mShellExitStatus;
 
@@ -220,8 +223,22 @@ public final class TerminalSession extends TerminalOutput {
         return mEmulator;
     }
 
+    private final Runnable mSynchronizedOutputTimeout = () -> {
+        if (mEmulator != null && mEmulator.isSynchronizedOutputActive()) {
+            mEmulator.doDecSetOrReset(false, 2026);
+            notifyScreenUpdate();
+        }
+    };
+
+    @Override
+    public void onSynchronizedOutputChanged(boolean enabled) {
+        mMainThreadHandler.removeCallbacks(mSynchronizedOutputTimeout);
+        if (enabled) mMainThreadHandler.postDelayed(mSynchronizedOutputTimeout, 1000);
+    }
+
     /** Notify the {@link #mClient} that the screen has changed. */
     protected void notifyScreenUpdate() {
+        if (mEmulator != null && mEmulator.isSynchronizedOutputActive()) return;
         mClient.onTextChanged(this);
     }
 
@@ -280,6 +297,11 @@ public final class TerminalSession extends TerminalOutput {
     }
 
     @Override
+    public void onClipboardRequest(String request) {
+        mClient.onClipboardRequest(this, request);
+    }
+
+    @Override
     public void onBell() {
         mClient.onBell(this);
     }
@@ -298,8 +320,26 @@ public final class TerminalSession extends TerminalOutput {
         if (mShellPid < 1) {
             return null;
         }
+        int cwdPid = mShellPid;
+        boolean imported = mShellPath.endsWith("/compat/bin/proot");
+        if (imported) {
+            if (readParentPid(mTracedShellPid) != mShellPid) {
+                mTracedShellPid = 0;
+                File[] processes = new File("/proc").listFiles();
+                if (processes != null) for (File process : processes) {
+                    try {
+                        int pid = Integer.parseInt(process.getName());
+                        if (Os.stat(process.getPath()).st_uid == Os.getuid() &&
+                            readParentPid(pid) == mShellPid &&
+                            (mTracedShellPid == 0 || pid < mTracedShellPid)) mTracedShellPid = pid;
+                    } catch (NumberFormatException | ErrnoException | SecurityException ignored) {}
+                }
+            }
+            if (mTracedShellPid == 0) return mCwd;
+            cwdPid = mTracedShellPid;
+        }
         try {
-            final String cwdSymlink = String.format("/proc/%s/cwd/", mShellPid);
+            final String cwdSymlink = String.format("/proc/%s/cwd/", cwdPid);
             String outputPath = new File(cwdSymlink).getCanonicalPath();
             String outputPathWithTrailingSlash = outputPath;
             if (!outputPath.endsWith("/")) {
@@ -311,7 +351,22 @@ public final class TerminalSession extends TerminalOutput {
         } catch (IOException | SecurityException e) {
             Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Error getting current directory", e);
         }
-        return null;
+        return imported ? mCwd : null;
+    }
+
+    private static int readParentPid(int pid) {
+        if (pid < 1) return -1;
+        try (FileInputStream input = new FileInputStream("/proc/" + pid + "/stat")) {
+            byte[] buffer = new byte[4096];
+            int length = input.read(buffer);
+            if (length < 1) return -1;
+            String stat = new String(buffer, 0, length, StandardCharsets.UTF_8);
+            // comm may contain spaces and parentheses; the fields follow its last ')'.
+            String[] fields = stat.substring(stat.lastIndexOf(')') + 1).trim().split("\\s+");
+            return fields.length > 1 ? Integer.parseInt(fields[1]) : -1;
+        } catch (IOException | NumberFormatException | SecurityException ignored) {
+            return -1;
+        }
     }
 
     private static FileDescriptor wrapFileDescriptor(int fileDescriptor, TerminalSessionClient client) {
@@ -349,6 +404,7 @@ public final class TerminalSession extends TerminalOutput {
             if (msg.what == MSG_PROCESS_EXITED) {
                 int exitCode = (Integer) msg.obj;
                 cleanupResources(exitCode);
+                mEmulator.doDecSetOrReset(false, 2026);
 
                 String exitDescription = "\r\n[Process completed";
                 if (exitCode > 0) {

@@ -1,0 +1,10 @@
+TERMUX KITTY STANDALONE v137
+
+Ctrl+Alt+Q toggles the terminal extra-key toolbar from a physical keyboard.
+Ctrl+Alt+K keeps its existing software-keyboard toggle.
+Each key press toggles once; Q release is consumed. The hardware-shortcut
+disable preference applies. Includes v136 prompt-free OSC 5522 clipboard reads.
+
+This signed update replaces com.termyx. Save running terminal work before
+installing; Android stops this app's running processes during replacement.
+Session persistence is not part of this update. Do not uninstall the app.

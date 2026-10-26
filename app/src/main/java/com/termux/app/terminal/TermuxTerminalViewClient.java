@@ -55,6 +55,11 @@ import androidx.drawerlayout.widget.DrawerLayout;
 
 public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
 
+    @Override
+    public boolean onPasteImage(TerminalSession session, android.net.Uri uri, String mime, Runnable release) {
+        return mTermuxTerminalSessionActivityClient.mKittyClipboard.acceptImage(session, uri, mime, release);
+    }
+
     final TermuxActivity mActivity;
 
     final TermuxTerminalSessionActivityClient mTermuxTerminalSessionActivityClient;
@@ -70,6 +75,10 @@ public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
     private boolean mTerminalCursorBlinkerStateAlreadySet;
 
     private List<KeyboardShortcut> mSessionShortcuts;
+
+    private boolean mToolbarShortcutDown;
+    private boolean mCloseSessionShortcutDown;
+    private boolean mPanoShortcutDown;
 
     private static final String LOG_TAG = "TermuxTerminalViewClient";
 
@@ -241,6 +250,45 @@ public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
     public boolean onKeyDown(int keyCode, KeyEvent e, TerminalSession currentSession) {
         if (handleVirtualKeys(keyCode, e, true)) return true;
 
+        // The key-up can belong to Pano after the picker takes focus.
+        if(keyCode==KeyEvent.KEYCODE_V && e.getRepeatCount()==0)mPanoShortcutDown=false;
+        if(keyCode==KeyEvent.KEYCODE_V && mPanoShortcutDown)return true;
+        if(!mActivity.getProperties().areHardwareKeyboardShortcutsDisabled() &&
+            keyCode==KeyEvent.KEYCODE_V && !e.isShiftPressed() &&
+            ((e.isMetaPressed() && !e.isCtrlPressed() && !e.isAltPressed()) ||
+             (e.isCtrlPressed() && e.isAltPressed() && !e.isMetaPressed()))){
+            mPanoShortcutDown=true;
+            if(e.getRepeatCount()==0)mActivity.openPanoClipboard(currentSession);
+            return true;
+        }
+
+        // Close the local terminal session before any key bytes reach SSH/tmux.
+        if (!mActivity.getProperties().areHardwareKeyboardShortcutsDisabled() &&
+            keyCode == KeyEvent.KEYCODE_W && e.isCtrlPressed() && e.isShiftPressed() &&
+            !e.isAltPressed() && !e.isMetaPressed()) {
+            mCloseSessionShortcutDown = true;
+            if (e.getRepeatCount() == 0)
+                mTermuxTerminalSessionActivityClient.closeSession(currentSession);
+            return true;
+        }
+
+        // Use the desktop terminal paste shortcut without sending Ctrl-V to the child.
+        if (!mActivity.getProperties().areHardwareKeyboardShortcutsDisabled() &&
+            keyCode == KeyEvent.KEYCODE_V && e.isCtrlPressed() && e.isShiftPressed() &&
+            !e.isAltPressed() && !e.isMetaPressed()) {
+            if (e.getRepeatCount() == 0) doPaste();
+            return true;
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_Q && mToolbarShortcutDown) return true;
+        if (!mActivity.getProperties().areHardwareKeyboardShortcutsDisabled() &&
+            keyCode == KeyEvent.KEYCODE_Q && e.isCtrlPressed() && e.isAltPressed() &&
+            !e.isShiftPressed() && !e.isMetaPressed()) {
+            mToolbarShortcutDown = true;
+            if (e.getRepeatCount() == 0) mActivity.toggleTerminalToolbar();
+            return true;
+        }
+
         if (keyCode == KeyEvent.KEYCODE_ENTER && !currentSession.isRunning()) {
             mTermuxTerminalSessionActivityClient.removeFinishedSession(currentSession);
             return true;
@@ -290,6 +338,16 @@ public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent e) {
+        if(keyCode==KeyEvent.KEYCODE_V && mPanoShortcutDown){mPanoShortcutDown=false;return true;}
+        if (keyCode == KeyEvent.KEYCODE_Q && mToolbarShortcutDown) {
+            mToolbarShortcutDown = false;
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_W && mCloseSessionShortcutDown) {
+            mCloseSessionShortcutDown = false;
+            return true;
+        }
+
         // If emulator is not set, like if bootstrap installation failed and user dismissed the error
         // dialog, then just exit the activity, otherwise they will be stuck in a broken state.
         if (keyCode == KeyEvent.KEYCODE_BACK && mActivity.getTerminalView().mEmulator == null) {
@@ -794,9 +852,7 @@ public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
         if (session == null) return;
         if (!session.isRunning()) return;
 
-        String text = ShareUtils.getTextStringFromClipboardIfSet(mActivity, true);
-        if (text != null)
-            session.getEmulator().paste(text);
+        mTermuxTerminalSessionActivityClient.mKittyClipboard.paste(session);
     }
 
 }

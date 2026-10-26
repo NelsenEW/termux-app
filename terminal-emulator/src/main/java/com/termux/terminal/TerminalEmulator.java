@@ -1,10 +1,14 @@
 package com.termux.terminal;
 
 import android.util.Base64;
+import android.graphics.Bitmap;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Stack;
 
@@ -160,7 +164,9 @@ public final class TerminalEmulator {
      *     {@link #mTerminalControlArgs}, and for later code points {@link #receiveApc(int)} is called
      *     instead.
      * <p>
-     * Currently, APC commands are only parsed, but ignored as none are supported.
+     * The only APC commands supported are the kitty graphics protocol `APC _G` commands, check
+     * {@link #doApcKittyGraphics(KittyImage)} for more info. All other APC commands are parsed, but
+     * ignored.
      * <p>
      * - https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Application-Program-Command-functions
      */
@@ -206,6 +212,12 @@ public final class TerminalEmulator {
     private static final int DECSET_BIT_MOUSE_PROTOCOL_SGR = 1 << 9;
     /** DECSET 2004 - see {@link #paste(String)} */
     private static final int DECSET_BIT_BRACKETED_PASTE_MODE = 1 << 10;
+
+    private static final int DECSET_BIT_CLIPBOARD_PASTE_MODE = 1 << 13;
+    private static final int DECSET_BIT_MOUSE_PROTOCOL_PIXELS = 1 << 14;
+    private static final int DECSET_BIT_MOUSE_TRACKING_ANY_EVENT = 1 << 15;
+    private static final int DECSET_BIT_SYNCHRONIZED_OUTPUT = 1 << 16;
+    public static final int MOUSE_MOVED = 35;
     /** Toggled with DECLRMM - http://www.vt100.net/docs/vt510-rm/DECLRMM */
     private static final int DECSET_BIT_LEFTRIGHT_MARGIN_MODE = 1 << 11;
     /** Not really DECSET bit... - http://www.vt100.net/docs/vt510-rm/DECSACE */
@@ -353,6 +365,106 @@ public final class TerminalEmulator {
 
 
 
+    /** The {@link #ESC_APC} command type is not known yet. */
+    private static final int APC_TYPE__NONE = -1;
+    /** The {@link #ESC_APC} command is not supported and its arguments will be ignored. */
+    private static final int APC_TYPE__UNSUPPORTED = 0;
+    /** The {@link #ESC_APC} command is a kitty graphics protocol `APC _G` command. */
+    private static final int APC_TYPE__KITTY_GRAPHICS = 1;
+    /**
+     * The {@link #ESC_APC} command cannot be processed, like if its control data is too long, so the
+     * rest of it is discarded instead of being printed on the terminal as text.
+     */
+    private static final int APC_TYPE__DISCARD = 2;
+
+    /**
+     * The Application Program Command `type` received as `ESC _ type`.
+     * This will be set as soon as the first code point after the `APC` escape sequence is received.
+     */
+    private int mApcType = APC_TYPE__NONE;
+
+    /**
+     * The initial capacity for the control data of a kitty graphics command stored in
+     * {@link #mTerminalControlArgs}. The `base64` encoded image data of a command is not stored in
+     * it, so only the `key=value` pairs before the `;` need to fit, which is normally under 64
+     * characters.
+     */
+    private static final int KITTY_GRAPHICS_CONTROL_DATA__INITIAL_CAPACITY = 128;
+
+    /**
+     * The max length of the control data of a kitty graphics command stored in
+     * {@link #mTerminalControlArgs}, which is the `key=value` pairs before the `;` that starts the
+     * `base64` encoded image data. The protocol defines around 25 keys with values of at most 10
+     * digits, so `4KB` is far more than a client can have a use for, and a command with control data
+     * longer than that is discarded instead of being printed on the terminal as text.
+     *
+     * The image data itself is not stored in {@link #mTerminalControlArgs} but is decoded as it is
+     * received by {@link KittyImage#readImageChar(char)}, so the size of the image data a single
+     * command can send is not limited, and is only bound in total by
+     * {@link KittyImage#IMAGE_DATA__MAX_LENGTH}.
+     */
+    private static final int KITTY_GRAPHICS_CONTROL_DATA__MAX_LENGTH = 4 * 1024;
+
+    /**
+     * The {@link KittyImage} if a kitty graphics image is being received with multiple commands,
+     * which is the case if the `m=1` key was passed with the last command received for the image.
+     */
+    private KittyImage mKittyImage;
+
+    /**
+     * The {@link KittyImage} of the kitty graphics command whose `base64` encoded image data is
+     * currently being received, which is set as soon as the `;` that ends the control data of the
+     * command has been received, and unset when the command has been processed.
+     */
+    private KittyImage mKittyGraphicsPayload;
+
+    private boolean mTmuxPassthrough;
+    private boolean mTmuxPassthroughEscape;
+
+    /**
+     * The image data transmitted for a kitty graphics image id, which is kept so that the image can
+     * be displayed again with an `a=p` command without transmitting it again.
+     */
+    private static final class KittyStoredImage {
+
+        /** The image format the image data was transmitted with, check {@link KittyImage#getFormat()}. */
+        final int mFormat;
+
+        /** The image data, which is the raw pixel data for {@link KittyImage#isRawFormat()} formats. */
+        final byte[] mImage;
+
+        /** The width and height in pixels of the image data, only set for the raw formats. */
+        final int mPixelWidth, mPixelHeight;
+        Bitmap mBitmap;
+
+        KittyStoredImage(int format, byte[] image, int pixelWidth, int pixelHeight) {
+            mFormat = format;
+            mImage = image;
+            mPixelWidth = pixelWidth;
+            mPixelHeight = pixelHeight;
+        }
+
+    }
+
+    /**
+     * The images transmitted for kitty graphics image ids with the `a=t` and `a=T` actions.
+     * The map is in insertion order so that the oldest images can be evicted first if
+     * {@link #KITTY_IMAGES__MAX_COUNT} or {@link #KITTY_IMAGES__MAX_TOTAL_SIZE} is exceeded.
+     */
+    private final LinkedHashMap<Long, KittyStoredImage> mKittyImages = new LinkedHashMap<>();
+    private final LinkedHashMap<Long, KittyPlaceholder> mKittyPlaceholders = new LinkedHashMap<>();
+
+    /** The combined size in bytes of all the image data stored in {@link #mKittyImages}. */
+    private int mKittyImagesTotalSize;
+
+    /** The max number of images whose data is stored in {@link #mKittyImages}. */
+    private static final int KITTY_IMAGES__MAX_COUNT = 32;
+
+    /** The max combined size in bytes of all the image data stored in {@link #mKittyImages}. */
+    private static final int KITTY_IMAGES__MAX_TOTAL_SIZE = 64 * 1024 * 1024;
+
+
+
     /**
      * True if the current escape sequence should continue, false if the current escape sequence should be terminated.
      * Used when parsing a single character.
@@ -427,9 +539,6 @@ public final class TerminalEmulator {
      */
     private int mScrollCounter = 0;
 
-    /** The cached value for this emulator for `TerminalView.mTopRow` as sessions/emulators may be switched.*/
-    private int mTopRow;
-
     /** If automatic scrolling of terminal is disabled */
     private boolean mAutoScrollDisabled;
 
@@ -447,7 +556,17 @@ public final class TerminalEmulator {
 
     private void setDecsetinternalBit(int internalBit, boolean set) {
         if (set) {
-            // The mouse modes are mutually exclusive.
+            // The mouse tracking modes and coordinate encodings are mutually exclusive.
+            if (internalBit == DECSET_BIT_MOUSE_PROTOCOL_PIXELS) {
+                mCurrentDecSetFlags &= ~DECSET_BIT_MOUSE_PROTOCOL_SGR;
+            } else if (internalBit == DECSET_BIT_MOUSE_PROTOCOL_SGR) {
+                mCurrentDecSetFlags &= ~DECSET_BIT_MOUSE_PROTOCOL_PIXELS;
+            }
+            if (internalBit == DECSET_BIT_MOUSE_TRACKING_ANY_EVENT) {
+                mCurrentDecSetFlags &= ~(DECSET_BIT_MOUSE_TRACKING_PRESS_RELEASE | DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT);
+            } else if (internalBit == DECSET_BIT_MOUSE_TRACKING_PRESS_RELEASE || internalBit == DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT) {
+                mCurrentDecSetFlags &= ~DECSET_BIT_MOUSE_TRACKING_ANY_EVENT;
+            }
             if (internalBit == DECSET_BIT_MOUSE_TRACKING_PRESS_RELEASE) {
                 setDecsetinternalBit(DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT, false);
             } else if (internalBit == DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT) {
@@ -481,12 +600,20 @@ public final class TerminalEmulator {
                 return DECSET_BIT_MOUSE_TRACKING_PRESS_RELEASE;
             case 1002:
                 return DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT;
+            case 1003:
+                return DECSET_BIT_MOUSE_TRACKING_ANY_EVENT;
+            case 1016:
+                return DECSET_BIT_MOUSE_PROTOCOL_PIXELS;
+            case 2026:
+                return DECSET_BIT_SYNCHRONIZED_OUTPUT;
             case 1004:
                 return DECSET_BIT_SEND_FOCUS_EVENTS;
             case 1006:
                 return DECSET_BIT_MOUSE_PROTOCOL_SGR;
             case 2004:
                 return DECSET_BIT_BRACKETED_PASTE_MODE;
+            case 5522:
+                return DECSET_BIT_CLIPBOARD_PASTE_MODE;
             default:
                 return -1;
             // throw new IllegalArgumentException("Unsupported decset: " + decsetBit);
@@ -556,9 +683,34 @@ public final class TerminalEmulator {
         if (row < 1) row = 1;
         if (row > mRows) row = mRows;
 
-        if (mouseButton == MOUSE_LEFT_BUTTON_MOVED && !isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT)) {
+        sendMouseEventCoordinates(mouseButton, column, row, pressed);
+    }
+
+    public boolean isPixelMouseEnabled() {
+        return isDecsetInternalBitSet(DECSET_BIT_MOUSE_PROTOCOL_PIXELS);
+    }
+
+    public boolean isAnyMouseTrackingActive() {
+        return isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_ANY_EVENT);
+    }
+
+    /** Pixel coordinates are 1-based and measured from the terminal text area's top left. */
+    public void sendMouseEventPixels(int button, int x, int y, boolean pressed) {
+        if (!isPixelMouseEnabled()) return;
+        x = Math.max(1, Math.min(x, mColumns * Math.max(1, mCellWidthPixels)));
+        y = Math.max(1, Math.min(y, mRows * Math.max(1, mCellHeightPixels)));
+        sendMouseEventCoordinates(button, x, y, pressed);
+    }
+
+    public boolean isSynchronizedOutputActive() {
+        return isDecsetInternalBitSet(DECSET_BIT_SYNCHRONIZED_OUTPUT);
+    }
+
+    private void sendMouseEventCoordinates(int mouseButton, int column, int row, boolean pressed) {
+        if ((mouseButton == MOUSE_MOVED && !isAnyMouseTrackingActive()) ||
+            (mouseButton == MOUSE_LEFT_BUTTON_MOVED && !isAnyMouseTrackingActive() && !isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT))) {
             // Do not send tracking.
-        } else if (isDecsetInternalBitSet(DECSET_BIT_MOUSE_PROTOCOL_SGR)) {
+        } else if (isDecsetInternalBitSet(DECSET_BIT_MOUSE_PROTOCOL_SGR) || isPixelMouseEnabled()) {
             mSession.write(String.format("\033[<%d;%d;%d" + (pressed ? 'M' : 'm'), mouseButton, column, row));
         } else {
             mouseButton = pressed ? mouseButton : 3; // 3 for release of all buttons.
@@ -669,9 +821,13 @@ public final class TerminalEmulator {
         return isDecsetInternalBitSet(DECSET_BIT_APPLICATION_CURSOR_KEYS);
     }
 
+    public boolean isClipboardPasteMode() {
+        return isDecsetInternalBitSet(DECSET_BIT_CLIPBOARD_PASTE_MODE);
+    }
+
     /** If mouse events are being sent as escape codes to the terminal. */
     public boolean isMouseTrackingActive() {
-        return isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_PRESS_RELEASE) || isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT);
+        return isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_PRESS_RELEASE) || isDecsetInternalBitSet(DECSET_BIT_MOUSE_TRACKING_BUTTON_EVENT) || isAnyMouseTrackingActive();
     }
 
     private void setDefaultTabStops() {
@@ -756,6 +912,22 @@ public final class TerminalEmulator {
     }
 
     public void processCodePoint(int b) {
+        if (mTmuxPassthrough) {
+            if (mTmuxPassthroughEscape) {
+                mTmuxPassthroughEscape = false;
+                if (b == '\\') {
+                    mTmuxPassthrough = false;
+                    return;
+                }
+                forwardTmuxCodePoint(27);
+                if (b != 27) forwardTmuxCodePoint(b);
+            } else if (b == 27) {
+                mTmuxPassthroughEscape = true;
+            } else {
+                forwardTmuxCodePoint(b);
+            }
+            return;
+        }
         mScreen.doTerminalBitmapsGC(300000);
 
         if (mEscapeState == ESC_OSC && mIsFastPathOsc) {
@@ -1141,6 +1313,12 @@ public final class TerminalEmulator {
     /**
      * Do {@link #ESC_DCS}. Check its docs for more info.
      */
+    private void forwardTmuxCodePoint(int b) {
+        mTmuxPassthrough = false;
+        processCodePoint(b);
+        mTmuxPassthrough = true;
+    }
+
     private void doDcs(final int b) {
         if (
             // End of DCS if string terminator ST `ESC \` received.
@@ -1322,6 +1500,15 @@ public final class TerminalEmulator {
                 ESC_DCS__ESC = false;
 
                 if (!collectTerminalControlArgs(b)) return;
+
+                if (mTerminalControlArgs.length() == 5 && mTerminalControlArgs.toString().equals("tmux;")) {
+                    clearTerminalControlArgs();
+                    clearDcsTypeVariables();
+                    finishSequence();
+                    mTmuxPassthrough = true;
+                    mTmuxPassthroughEscape = false;
+                    return;
+                }
 
                 if (ESC_DCS__CHECK_IF_SIXEL && !ESC_DCS__SIXEL) {
                     // Check if `DCS q` or `DCS P1; P2; P3; q` received from Sixel
@@ -1786,11 +1973,19 @@ public final class TerminalEmulator {
     }
 
     public void doDecSetOrReset(boolean setting, int externalBit) {
+        boolean wasSynchronized = isSynchronizedOutputActive();
         int internalBit = mapDecSetBitToInternalBit(externalBit);
         if (internalBit != -1) {
             setDecsetinternalBit(internalBit, setting);
         }
+        if (wasSynchronized != isSynchronizedOutputActive()) {
+            mSession.onSynchronizedOutputChanged(isSynchronizedOutputActive());
+        }
         switch (externalBit) {
+            case 2026:
+                break;
+            case 1016:
+                break;
             case 1: // Application Cursor Keys (DECCKM).
                 break;
             case 3: // Set: 132 column mode (. Reset: 80 column mode. ANSI name: DECCOLM.
@@ -1878,6 +2073,9 @@ public final class TerminalEmulator {
             }
             case 2004:
                 // Bracketed paste mode - setting bit is enough.
+                break;
+            case 5522:
+                // Unsolicited MIME listings on user paste; Android owns the clipboard payload.
                 break;
             default:
                 unknownParameter(externalBit);
@@ -2094,6 +2292,7 @@ public final class TerminalEmulator {
                 break;
             case '_': // APC - Application Program Command.
                 clearTerminalControlArgs();
+                clearApcTypeVariables();
                 continueSequence(ESC_APC);
                 break;
             default:
@@ -2597,7 +2796,41 @@ public final class TerminalEmulator {
                 continueSequence(ESC_APC__ESC);
                 break;
             default:
-                if (!collectTerminalControlArgs(b)) return;
+                // The `base64` encoded image data of a kitty graphics command is decoded as it is
+                // received instead of being collected in the args buffer first, so that a client
+                // that sends an entire image with a single command is supported.
+                if (mKittyGraphicsPayload != null) {
+                    mKittyGraphicsPayload.readImageChar((char) b);
+                    continueSequence(ESC_APC);
+                    return;
+                }
+
+                if (mApcType == APC_TYPE__DISCARD) {
+                    continueSequence(ESC_APC);
+                    return;
+                }
+
+                if (!collectTerminalControlArgs(b)) {
+                    abortApc();
+                    return;
+                }
+
+                if (mApcType == APC_TYPE__NONE) {
+                    setApcTypeVariables();
+                }
+
+                if (mApcType == APC_TYPE__KITTY_GRAPHICS) {
+                    if (b == ';') {
+                        startApcKittyGraphicsPayload();
+                    } else if (mTerminalControlArgs.length() >= KITTY_GRAPHICS_CONTROL_DATA__MAX_LENGTH) {
+                        Logger.logError(mClient, LOG_TAG, "Discarding kitty graphics command with" +
+                            " control data longer than max length " + KITTY_GRAPHICS_CONTROL_DATA__MAX_LENGTH);
+                        mKittyImage = null;
+                        mApcType = APC_TYPE__DISCARD;
+                        clearTerminalControlArgs();
+                    }
+                }
+                break;
         }
     }
 
@@ -2607,28 +2840,586 @@ public final class TerminalEmulator {
     private void receiveApcEsc(final int b) {
         switch (b) {
             case '\\':
-                //doApc();
-                //clearApcTypeVariables();
+                doApc();
+                clearApcTypeVariables();
                 break;
             default:
-                // The ESC character was not followed by a \, so insert the ESC and
-                // the current character in arg buffer.
-                if (!collectTerminalControlArgs(27)) return;
-                if (!collectTerminalControlArgs(b)) return;
+                // The ESC character was not followed by a \, so it and the current character are
+                // part of the command data.
+                if (mKittyGraphicsPayload != null) {
+                    mKittyGraphicsPayload.readImageChar((char) 27);
+                    mKittyGraphicsPayload.readImageChar((char) b);
+                    continueSequence(ESC_APC);
+                    break;
+                }
+
+                if (mApcType == APC_TYPE__DISCARD) {
+                    continueSequence(ESC_APC);
+                    break;
+                }
+
+                // Insert the ESC and the current character in arg buffer.
+                if (!collectTerminalControlArgs(27)) {
+                    abortApc();
+                    return;
+                }
+                if (!collectTerminalControlArgs(b)) {
+                    abortApc();
+                    return;
+                }
                 continueSequence(ESC_APC);
                 break;
         }
     }
 
     /**
-     * Clear {@link #ESC_APC} type variables.
+     * Abort an {@link #ESC_APC} command whose args could not be collected, like if the args buffer
+     * overflowed. The command will not be processed, and the data received for any kitty graphics
+     * image being transmitted with multiple commands is incomplete and must be dropped.
      */
-    public void clearApcTypeVariables() {}
+    private void abortApc() {
+        mKittyImage = null;
+        clearApcTypeVariables();
+    }
+
+    /**
+     * Start receiving the `base64` encoded image data of a kitty graphics command, which is called
+     * as soon as the `;` that ends its control data has been received, so that the image data can be
+     * decoded as it is received instead of being collected in {@link #mTerminalControlArgs} first.
+     */
+    private void startApcKittyGraphicsPayload() {
+        KittyImage kittyImage = resolveApcKittyGraphicsCommand();
+
+        // The control data has been read, and the image data is not stored in the args buffer, so it
+        // is no longer needed for this command.
+        clearTerminalControlArgs();
+
+        if (!kittyImage.isFailed()) {
+            kittyImage.startImage();
+        }
+
+        // The image data is still passed to the command if it has already failed, so that it is
+        // discarded instead of being printed on the terminal as text.
+        mKittyGraphicsPayload = kittyImage;
+    }
+
+    /**
+     * Read the control data of a kitty graphics command from {@link #mTerminalControlArgs} and get
+     * the {@link KittyImage} to process the command with, which is the {@link #mKittyImage} that is
+     * still being received if the command is a continuation chunk for it.
+     *
+     * @return Returns the {@link KittyImage} for the command, which will have
+     * {@link KittyImage#getErrorCode()} set if the control data was not valid.
+     */
+    private KittyImage resolveApcKittyGraphicsCommand() {
+        KittyImage kittyImage = new KittyImage(mClient);
+
+        // The `mTerminalControlArgs` contains `G<control data>[;]`.
+        if (kittyImage.readControlData(mTerminalControlArgs, /* `G` */ 1) < 0) {
+            // The control data is not valid, so an image that is still being received cannot be
+            // continued by this command either.
+            mKittyImage = null;
+            return kittyImage;
+        }
+
+        // As per the protocol, a continuation chunk of an image being received with multiple
+        // commands only passes the `m` and `q` keys, so a command that passes the `a` key is always
+        // a new command, even if the previous image was not received completely.
+        if (mKittyImage != null) {
+            if (kittyImage.hasAction()) {
+                Logger.logWarn(mClient, LOG_TAG, "A new kitty graphics command received while an image was still being received");
+                mKittyImage = null;
+            } else {
+                mKittyImage.readContinuationControlData(kittyImage);
+                kittyImage = mKittyImage;
+            }
+        }
+
+        return kittyImage;
+    }
+
+    /**
+     * Set {@link #ESC_APC} type variables. The type of an `APC` command is defined by the first
+     * code point received after the `APC` escape sequence.
+     */
+    void setApcTypeVariables() {
+        if (mApcType != APC_TYPE__NONE) return;
+        if (mTerminalControlArgs.length() < 1) return;
+
+        if (mTerminalControlArgs.charAt(0) == 'G') {
+            // Only the control data of a kitty graphics command is stored in the args buffer, since
+            // its image data is decoded as it is received, so only a small capacity is required.
+            mApcType = APC_TYPE__KITTY_GRAPHICS;
+            ensureTerminalControlArgsCapacity(KITTY_GRAPHICS_CONTROL_DATA__INITIAL_CAPACITY);
+        } else {
+            mApcType = APC_TYPE__UNSUPPORTED;
+        }
+    }
+
+    /**
+     * Clear {@link #ESC_APC} type variables.
+     *
+     * The {@link #mKittyImage} is not cleared as sequential APC commands will be received for an
+     * image transmitted with multiple commands, and the variable is required to be set until the
+     * final command for it is received.
+     */
+    public void clearApcTypeVariables() {
+        mApcType = APC_TYPE__NONE;
+        mKittyGraphicsPayload = null;
+    }
 
     /**
      * Do {@link #ESC_APC}. Check its docs for more info.
      */
-    private void doApc() {}
+    private void doApc() {
+        if (mKittyGraphicsPayload != null) {
+            // The image data of the command has already been received and decoded.
+            doApcKittyGraphics(mKittyGraphicsPayload);
+        } else if (mApcType == APC_TYPE__KITTY_GRAPHICS) {
+            // A command without any image data, like `a=p` and `a=d`.
+            KittyImage kittyImage = resolveApcKittyGraphicsCommand();
+            if (!kittyImage.isFailed()) {
+                kittyImage.startImage();
+            }
+            doApcKittyGraphics(kittyImage);
+        } else {
+            // All other APC commands are silently ignored, like xterm does.
+            if (LOG_ESCAPE_SEQUENCES)
+                Logger.logWarn(mClient, LOG_TAG, "Ignoring unsupported APC command");
+        }
+
+        // Free image data from memory held in apc command arguments as it is no longer needed.
+        clearTerminalControlArgs();
+
+        finishSequence();
+    }
+
+
+
+    /**
+     * Do a kitty graphics protocol `APC _ G <control data> [; <payload>] ST` command.
+     *
+     * Only a minimal subset of the protocol is supported.
+     *
+     * The following is supported:
+     * - `a=t` (transmit), `a=T` (transmit and display), `a=p` (display an image that was already
+     *   transmitted), `a=q` (query) and `a=d` (delete) actions.
+     * - `t=d` (direct) transmission medium, where the image data is sent in the command payload.
+     * - `f=100` (`PNG`), `f=24` (raw `RGB`) and `f=32` (raw `RGBA`) image formats, with the pixel
+     *   dimensions of the raw formats passed with the `s` and `v` keys.
+     * - `m=1`/`m=0` chunked transmission of the image data with multiple commands.
+     * - `i=<image id>` and `p=<placement id>`, and the `d=a`, `d=A`, `d=i` and `d=I` delete modes.
+     * - `c=<columns>`/`r=<rows>` for the number of cells to display the image in.
+     * - `x=`, `y=`, `w=` and `h=` for displaying only a source rectangle of the transmitted image,
+     *   which is cropped out of the image before it is scaled to the cells it is displayed in.
+     * - `C=1` for not moving the cursor after displaying an image.
+     * - `q=<quiet level>` for suppressing success and error responses.
+     *
+     * The following is **not** supported and will result in an `ENOTSUP` error response:
+     * - `t=f`, `t=t` and `t=s` transmission mediums, where the image data is read from a file or
+     *   shared memory. Reading arbitrary files that the terminal has access to on behalf of a
+     *   client is a security concern, so this is intentionally not implemented.
+     * - Animation queues, PNG frame edits, `a=a` (animate) and `a=c` (compose).
+     * Root-frame raw RGB/RGBA edits (`a=f,r=1`) and zlib compression are supported.
+     *
+     * The image data of a command is decoded as it is received by {@link KittyImage#readImageChar(char)}
+     * instead of being collected in {@link #mTerminalControlArgs} first, so a client may send an
+     * entire image with a single command instead of splitting it into the chunks of at most `4096`
+     * bytes the protocol recommends.
+     *
+     * The keys for unsupported features are read but ignored instead of resulting in an error
+     * response, since a client is expected to be able to send them for images this terminal can
+     * display. Every key other than the `a`, `d`, `t`, `o`, `f`, `i`, `p`, `m`, `q`, `c`, `r`, `s`,
+     * `v`, `C`, `x`, `y`, `w` and `h` keys listed above is ignored, and its value is not validated
+     * since it is not used. These are the `I` (image number), `z` (z-index), `X` and `Y` (pixel
+     * offset of the image inside its first cell) and `U` (unicode placeholder) keys, the `S`, `O`,
+     * `P` and `Q` keys for the transmission mediums and placement features that are not supported,
+     * and any key that is not part of the protocol at all. Note that not honouring `X` and `Y` means
+     * an image is aligned to the cell grid instead of being offset by up to one cell width and
+     * height, and that not honouring `I` means a client must pass an image id with the `i` key for
+     * an image it wants to display again with an `a=p` command.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/
+     */
+    private void doApcKittyGraphics(KittyImage kittyImage) {
+        if (kittyImage.isFailed()) {
+            mKittyImage = null;
+            respondToKittyGraphicsCommand(kittyImage);
+            return;
+        }
+
+        // Wait for the remaining chunks of the image before processing the command. No response is
+        // sent until the final chunk has been received.
+        if (kittyImage.hasMoreChunks()) {
+            mKittyImage = kittyImage;
+            return;
+        }
+
+        mKittyImage = null;
+
+        switch (kittyImage.getAction()) {
+            case KittyImage.ACTION__QUERY:
+                doKittyGraphicsQuery(kittyImage);
+                break;
+            case KittyImage.ACTION__TRANSMIT:
+            case KittyImage.ACTION__TRANSMIT_AND_DISPLAY:
+                doKittyGraphicsTransmit(kittyImage);
+                break;
+            case KittyImage.ACTION__FRAME:
+                doKittyGraphicsFrameEdit(kittyImage);
+                break;
+            case KittyImage.ACTION__PUT:
+                doKittyGraphicsPut(kittyImage);
+                break;
+            case KittyImage.ACTION__DELETE:
+                doKittyGraphicsDelete(kittyImage);
+                break;
+            default:
+                kittyImage.setStateFailed(KittyImage.ERROR__ENOTSUP, "unsupported action");
+                break;
+        }
+
+        respondToKittyGraphicsCommand(kittyImage);
+    }
+
+    /**
+     * Do a kitty graphics `a=q` command.
+     *
+     * The command is used by clients to detect whether the terminal supports the protocol, and the
+     * image data passed with it must be validated but must not be stored or displayed.
+     */
+    private void doKittyGraphicsQuery(KittyImage kittyImage) {
+        // The transmission medium, image format and compression have already been validated while
+        // reading the control data, so only the image data itself is left to validate. The image
+        // data of the `f=100` (`PNG`) format is not decoded into a bitmap for a query, since that
+        // would be an expensive operation for data that is going to be discarded.
+        kittyImage.finishImage();
+    }
+
+    /** Pixel's delta renderer edits the existing root frame, never creating an animation queue. */
+    private void doKittyGraphicsFrameEdit(KittyImage command) {
+        if (command.getRows() != 1) {
+            command.setStateFailed(KittyImage.ERROR__ENOTSUP, "only root frame edits (r=1) are supported");
+            return;
+        }
+        KittyStoredImage image = mKittyImages.get(command.getImageId());
+        if (image == null) {
+            command.setStateFailed(KittyImage.ERROR__ENOENT, "no image transmitted for image id");
+            return;
+        }
+        if (!command.isRawFormat() || (image.mFormat != KittyImage.FORMAT__RGB && image.mFormat != KittyImage.FORMAT__RGBA)) {
+            command.setStateFailed(KittyImage.ERROR__ENOTSUP, "frame edits require raw RGB or RGBA images");
+            return;
+        }
+        if (command.getFrameComposition() > 1) {
+            command.setStateFailed(KittyImage.ERROR__EINVAL, "invalid frame composition mode");
+            return;
+        }
+        if (!command.finishImage()) return;
+        int x = command.getSourceX(), y = command.getSourceY();
+        int w = command.getPixelWidth(), h = command.getPixelHeight();
+        if ((long) x + w > image.mPixelWidth || (long) y + h > image.mPixelHeight) {
+            command.setStateFailed(KittyImage.ERROR__EINVAL, "frame edit rectangle outside image");
+            return;
+        }
+        try {
+            int[] colors = KittyFrameEdit.apply(image.mImage, image.mFormat, image.mPixelWidth,
+                command.getDecodedImage(), command.getFormat(), x, y, w, h,
+                command.getFrameComposition() == 1);
+            if (image.mBitmap != null) image.mBitmap.setPixels(colors, 0, w, x, y, w, h);
+            mMainBuffer.updateKittyImagePixels(command.getImageId(), colors, x, y, w, h);
+            mAltBuffer.updateKittyImagePixels(command.getImageId(), colors, x, y, w, h);
+        } catch (OutOfMemoryError error) {
+            command.setStateFailed(KittyImage.ERROR__ENOSPC, "not enough memory for frame edit");
+        }
+    }
+
+    /** Do a kitty graphics `a=t` or `a=T` command. */
+    private void doKittyGraphicsTransmit(KittyImage kittyImage) {
+        if (!kittyImage.finishImage()) return;
+
+        long imageId = kittyImage.getImageId();
+        KittyStoredImage storedImage = new KittyStoredImage(kittyImage.getFormat(),
+            kittyImage.getDecodedImage(), kittyImage.getPixelWidth(), kittyImage.getPixelHeight());
+
+        // The image is only stored if it can be referenced by an image id with an `a=p` command later.
+        if (imageId != KittyImage.IMAGE_ID__NONE) {
+            storeKittyImage(imageId, storedImage);
+        }
+
+        if (kittyImage.getAction() == KittyImage.ACTION__TRANSMIT_AND_DISPLAY) {
+            placeKittyImage(kittyImage, storedImage);
+        }
+    }
+
+    /**
+     * Do a kitty graphics `a=p` command to display an image that was already transmitted with an
+     * `a=t` or `a=T` command without transmitting the image data again.
+     */
+    private void doKittyGraphicsPut(KittyImage kittyImage) {
+        long imageId = kittyImage.getImageId();
+        if (imageId == KittyImage.IMAGE_ID__NONE) {
+            kittyImage.setStateFailed(KittyImage.ERROR__EINVAL, "missing image id");
+            return;
+        }
+
+        KittyStoredImage storedImage = mKittyImages.get(imageId);
+        if (storedImage == null) {
+            kittyImage.setStateFailed(KittyImage.ERROR__ENOENT, "no image transmitted for image id");
+            return;
+        }
+
+        placeKittyImage(kittyImage, storedImage);
+    }
+
+    /** Display a kitty graphics image at the cursor position as a placement of its image id. */
+    private void placeKittyImage(KittyImage kittyImage, KittyStoredImage storedImage) {
+        if (kittyImage.isUnicodePlaceholder()) {
+            placeKittyPlaceholder(kittyImage, storedImage);
+            return;
+        }
+        // The source rectangle is validated against the dimensions the image was transmitted with if
+        // they are known, so that a client gets an error response instead of the wrong part of the
+        // image being displayed.
+        if (!kittyImage.validateSourceRectangle(storedImage.mPixelWidth, storedImage.mPixelHeight)) {
+            return;
+        }
+
+        int[] cursorDelta = mScreen.addTerminalBitmapForKittyImage(storedImage.mFormat, storedImage.mImage,
+            storedImage.mPixelWidth, storedImage.mPixelHeight,
+            kittyImage.getSourceX(), kittyImage.getSourceY(),
+            kittyImage.getSourceWidth(), kittyImage.getSourceHeight(),
+            mCursorCol, mCursorRow, mCellWidthPixels, mCellHeightPixels,
+            kittyImage.getWidthPixels(mCellWidthPixels), kittyImage.getHeightPixels(mCellHeightPixels),
+            kittyImage.shouldPreserveAspectRatio(),
+            kittyImage.getImageId(), kittyImage.getPlacementId());
+
+        // A bitmap always covers at least one column if it was created successfully.
+        if (cursorDelta[1] < 1) {
+            kittyImage.setStateFailed(KittyImage.ERROR__EBADPNG, "displaying image failed");
+            return;
+        }
+
+        // The `C=1` key requires the cursor to be left where it was, which clients that position the
+        // cursor themselves before displaying an image rely on.
+        if (kittyImage.shouldMoveCursor()) {
+            moveCursorAfterTerminalBitmap(cursorDelta);
+        }
+    }
+
+    private void placeKittyPlaceholder(KittyImage command, KittyStoredImage image) {
+        if (command.getImageId() == 0 || !mKittyImages.containsKey(command.getImageId())) {
+            command.setStateFailed(KittyImage.ERROR__EINVAL, "virtual placement requires a stored image id");
+            return;
+        }
+        if (image.mBitmap == null) {
+            Bitmap bitmap = image.mFormat == KittyImage.FORMAT__PNG
+                ? TerminalBitmap.createBitmapFromPng(mClient, 0, image.mImage, false, -1, -1, false)
+                : TerminalBitmap.createBitmapFromRawPixels(mClient, 0, image.mImage,
+                    KittyImage.getBytesPerPixel(image.mFormat), image.mPixelWidth, image.mPixelHeight);
+            if (bitmap == null) {
+                command.setStateFailed(KittyImage.ERROR__EBADPNG, "decoding virtual placement failed");
+                return;
+            }
+            if ((long) image.mImage.length + bitmap.getAllocationByteCount() > KITTY_IMAGES__MAX_TOTAL_SIZE) {
+                command.setStateFailed(KittyImage.ERROR__ENOSPC, "virtual image exceeds memory budget");
+                return;
+            }
+            image.mBitmap = bitmap;
+            mKittyImagesTotalSize += bitmap.getAllocationByteCount();
+            evictKittyImages(command.getImageId());
+        }
+        KittyPlaceholder placement = KittyPlaceholder.create(command, image.mBitmap, mCellWidthPixels, mCellHeightPixels);
+        if (placement == null) {
+            command.setStateFailed(KittyImage.ERROR__EINVAL, "invalid virtual placement bounds");
+            return;
+        }
+        long key = (command.getImageId() << 32) | command.getPlacementId();
+        mKittyPlaceholders.put(key, placement);
+        while (mKittyPlaceholders.size() > 256) {
+            mKittyPlaceholders.remove(mKittyPlaceholders.keySet().iterator().next());
+        }
+    }
+
+    public KittyPlaceholder getKittyPlaceholder(long imageId) {
+        KittyPlaceholder defaultPlacement = mKittyPlaceholders.get(imageId << 32);
+        if (defaultPlacement != null) return defaultPlacement;
+        for (KittyPlaceholder placement : mKittyPlaceholders.values()) {
+            if (placement.imageId == imageId) return placement;
+        }
+        return null;
+    }
+
+    private void deleteKittyPlaceholders(long imageId, long placementId) {
+        Iterator<KittyPlaceholder> iterator = mKittyPlaceholders.values().iterator();
+        while (iterator.hasNext()) {
+            KittyPlaceholder placement = iterator.next();
+            if (placement.imageId == imageId && (placementId == 0 || placement.placementId == placementId)) iterator.remove();
+        }
+    }
+
+    /** Do a kitty graphics `a=d` command. */
+    private void doKittyGraphicsDelete(KittyImage kittyImage) {
+        char deleteMode = kittyImage.getDeleteMode();
+        switch (deleteMode) {
+            case KittyImage.DELETE_MODE__NONE: // The `d` key defaults to `d=a`.
+            case KittyImage.DELETE_MODE__ALL:
+            case KittyImage.DELETE_MODE__ALL_AND_FREE_DATA:
+                // All the placements are deleted regardless of the image id passed as per the protocol.
+                mScreen.deleteAllKittyImagePlacements();
+                if (deleteMode == KittyImage.DELETE_MODE__ALL_AND_FREE_DATA) {
+                    for (Long id : mKittyImages.keySet().toArray(new Long[0])) {
+                        // Virtual prototypes have no screen position and survive d=A.
+                        if (getKittyPlaceholder(id) == null) removeKittyImage(id);
+                    }
+                }
+                break;
+            case KittyImage.DELETE_MODE__ID:
+            case KittyImage.DELETE_MODE__ID_AND_FREE_DATA:
+                long imageId = kittyImage.getImageId();
+                if (imageId == KittyImage.IMAGE_ID__NONE) {
+                    kittyImage.setStateFailed(KittyImage.ERROR__EINVAL, "missing image id");
+                    return;
+                }
+
+                // Deleting an image that does not exist is not an error as per the protocol. Only
+                // the placement passed with the `p` key is deleted if it is passed.
+                mScreen.deleteKittyImagePlacements(imageId, kittyImage.getPlacementId());
+                deleteKittyPlaceholders(imageId, kittyImage.getPlacementId());
+                if (deleteMode == KittyImage.DELETE_MODE__ID_AND_FREE_DATA) {
+                    removeKittyImage(imageId);
+                }
+                break;
+            default:
+                // The `d=n`, `d=c`, `d=p`, `d=q`, `d=r`, `d=x`, `d=y` and `d=z` delete modes require
+                // image numbers or coordinates, which are not supported.
+                kittyImage.setStateFailed(KittyImage.ERROR__ENOTSUP, "unsupported delete mode");
+                break;
+        }
+    }
+
+    /**
+     * Send the response for a kitty graphics command as per the quiet level passed with its `q` key.
+     *
+     * The success response is `ESC _ G i=<id> ; OK ST` and the error response is
+     * `ESC _ G i=<id> ; <error code> : <error message> ST`.
+     */
+    private void respondToKittyGraphicsCommand(KittyImage kittyImage) {
+        // A response cannot be matched with the command that caused it without an image id, so none
+        // is sent, like kitty does.
+        long imageId = kittyImage.getImageId();
+        if (imageId == KittyImage.IMAGE_ID__NONE) return;
+
+        int quiet = kittyImage.getQuiet();
+
+        if (!kittyImage.isFailed()) {
+            if (quiet >= KittyImage.QUIET__SUCCESS) return;
+            mSession.write("\033_Gi=" + imageId + ";OK\033\\");
+        } else {
+            if (quiet >= KittyImage.QUIET__ALL) return;
+            mSession.write("\033_Gi=" + imageId + ";" + kittyImage.getErrorCode() + ":" + kittyImage.getErrorMessage() + "\033\\");
+        }
+    }
+
+    /**
+     * Store the image transmitted for a kitty graphics image id so that it can be displayed again
+     * with an `a=p` command and freed with an `a=d,d=I` command.
+     */
+    private void storeKittyImage(long imageId, KittyStoredImage storedImage) {
+        removeKittyImage(imageId);
+
+        if (storedImage.mImage.length > KITTY_IMAGES__MAX_TOTAL_SIZE) {
+            Logger.logWarn(mClient, LOG_TAG, "Not storing kitty graphics image " + imageId + " with" +
+                " size " + storedImage.mImage.length + " greater than max total size " + KITTY_IMAGES__MAX_TOTAL_SIZE);
+            return;
+        }
+
+        mKittyImages.put(imageId, storedImage);
+        mKittyImagesTotalSize += storedImage.mImage.length;
+
+        evictKittyImages(imageId);
+    }
+
+    private static int kittyImageMemory(KittyStoredImage image) {
+        return image.mImage.length + (image.mBitmap == null ? 0 : image.mBitmap.getAllocationByteCount());
+    }
+
+    private void evictKittyImages(long imageId) {
+        // Evict the oldest images if the storage limits are exceeded.
+        Iterator<Map.Entry<Long, KittyStoredImage>> iterator = mKittyImages.entrySet().iterator();
+        while (iterator.hasNext() &&
+            (mKittyImages.size() > KITTY_IMAGES__MAX_COUNT || mKittyImagesTotalSize > KITTY_IMAGES__MAX_TOTAL_SIZE)) {
+            Map.Entry<Long, KittyStoredImage> entry = iterator.next();
+            if (entry.getKey() == imageId) continue;
+            mKittyImagesTotalSize -= kittyImageMemory(entry.getValue());
+            deleteKittyPlaceholders(entry.getKey(), 0);
+            iterator.remove();
+        }
+    }
+
+    /** Remove the image stored for a kitty graphics image id. */
+    private void removeKittyImage(long imageId) {
+        deleteKittyPlaceholders(imageId, 0);
+        KittyStoredImage storedImage = mKittyImages.remove(imageId);
+        if (storedImage != null) {
+            mKittyImagesTotalSize -= kittyImageMemory(storedImage);
+        }
+    }
+
+    /** Remove the image data stored for all the kitty graphics image ids. */
+    private void clearKittyImages() {
+        mKittyPlaceholders.clear();
+        mKittyImages.clear();
+        mKittyImagesTotalSize = 0;
+    }
+
+    /**
+     * Get the length of the image data stored for a kitty graphics image id, or `-1` if no image
+     * data is stored for it.
+     */
+    byte[] copyKittyImageData(long imageId) {
+        KittyStoredImage image = mKittyImages.get(imageId);
+        return image == null ? null : image.mImage.clone();
+    }
+
+    public int getKittyImageDataLength(long imageId) {
+        KittyStoredImage storedImage = mKittyImages.get(imageId);
+        return storedImage != null ? storedImage.mImage.length : -1;
+    }
+
+    /**
+     * Move the cursor to after a {@link TerminalBitmap} that was added to the screen.
+     *
+     * If the image fits on the screen, then the cursor is moved to the column after the image on the
+     * last row the image covers, otherwise it is wrapped to the first column of the row after the
+     * image.
+     *
+     * **Note that this changes the behaviour of sixel and iTerm images as well.** The condition to
+     * check if the image fits was `col < mColumns - 1`, which treated an image that ends exactly at
+     * the last column of the screen as if it did not fit, and so consumed one row more than the image
+     * covers and left the cursor at the first column of it. An image that ends exactly at the last
+     * column does fit, so the condition must be `col < mColumns`. Check the `0003` patch in the pull
+     * request for this as a standalone change.
+     *
+     * @param cursorDelta The cursor delta returned by
+     * {@link TerminalBuffer#addTerminalBitmapForImage(byte[], int, int, int, int, int, int, boolean)},
+     * where the first value is the number of rows the bitmap covers on the screen and the second
+     * value is the number of columns. The array is not modified, since it is the
+     * {@link TerminalBitmap#getCursorDelta()} array of the bitmap itself.
+     */
+    void moveCursorAfterTerminalBitmap(int[] cursorDelta) {
+        int rows = cursorDelta[0];
+        int col = cursorDelta[1] + mCursorCol;
+        if (col < mColumns) {
+            rows -= 1;
+        } else {
+            col = 0;
+        }
+        for (; rows > 0; rows--) {
+            doLinefeed();
+        }
+        mCursorCol = col;
+    }
 
 
 
@@ -2678,7 +3469,7 @@ public final class TerminalEmulator {
      */
     void setOscTypeVariables() {
         if (mOscType >= 0) return;
-        if (mTerminalControlArgs.indexOf(":") < 0) return;
+        if (mTerminalControlArgs.indexOf(";") < 0) return;
 
         int value = -1;
         int argsLength = mTerminalControlArgs.length();
@@ -2701,6 +3492,11 @@ public final class TerminalEmulator {
             Integer terminalControlArgsCapacity = null;
             Integer terminalControlArgsMaxLength = null;
             switch (mOscType) {
+                case 5522:
+                    // The protocol streams 4096-byte chunks rather than one large OSC string.
+                    mIsFastPathOsc = true;
+                    terminalControlArgsMaxLength = 16384;
+                    break;
                 case 52:
                     // Android has a `~100KB` limit for sharing/sending `UTF-16` encoded `String`
                     // with binder tranasactions, including clipboard, otherwise can result in a
@@ -2847,6 +3643,9 @@ public final class TerminalEmulator {
                     }
                 }
                 break;
+            case 5522:
+                mSession.onClipboardRequest(textParameter);
+                break;
             case 52: // Manipulate Selection Data. Skip the optional first selection parameter(s).
                 int startIndex = textParameter.indexOf(";") + 1;
                 try {
@@ -2977,16 +3776,7 @@ public final class TerminalEmulator {
                                 iTermImage.getWidth(), iTermImage.getHeight(),
                                 iTermImage.shouldPreserveAspectRatio());
 
-                            int col = cursorDelta[1] + mCursorCol;
-                            if (col < mColumns - 1) {
-                                cursorDelta[0] -= 1;
-                            } else {
-                                col = 0;
-                            }
-                            for (; cursorDelta[0] > 0; cursorDelta[0]--) {
-                                doLinefeed();
-                            }
-                            mCursorCol = col;
+                            moveCursorAfterTerminalBitmap(cursorDelta);
                         }
                         // Saving files in downloads folder is not supported currently.
                         else {}
@@ -3472,18 +4262,11 @@ public final class TerminalEmulator {
     }
 
 
-
-    public int getTopRow() {
-        return mTopRow;
-    }
-
-    public void setTopRow(int topRow) {
-        mTopRow = topRow;
-    }
-
-
     /** Reset terminal state so user can interact with it regardless of present state. */
     public void reset() {
+        if (isSynchronizedOutputActive()) mSession.onSynchronizedOutputChanged(false);
+        mTmuxPassthrough = false;
+        mTmuxPassthroughEscape = false;
         setCursorStyle();
         mArgIndex = 0;
         mContinueSequence = false;
@@ -3516,7 +4299,10 @@ public final class TerminalEmulator {
 
         clearTerminalControlArgs();
         clearOscTypeVariables();
+        clearApcTypeVariables();
         mITermImage = null;
+        mKittyImage = null;
+        clearKittyImages();
     }
 
     public String getSelectedText(int x1, int y1, int x2, int y2) {

@@ -24,6 +24,11 @@ public abstract class TerminalOutput {
     /** Notify the terminal client that text should be pasted from clipboard. */
     public abstract void onPasteTextFromClipboard();
 
+    /** Handle a Kitty clipboard protocol packet without embedding Android clipboard code here. */
+    public void onClipboardRequest(String request) {}
+
+    public void onSynchronizedOutputChanged(boolean enabled) {}
+
     /** Notify the terminal client that a bell character (ASCII 7, bell, BEL, \a, ^G)) has been received. */
     public abstract void onBell();
 

@@ -20,6 +20,16 @@ public interface TerminalSessionClient {
 
     void onPasteTextFromClipboard(@Nullable TerminalSession session);
 
+    default void onClipboardRequest(@NonNull TerminalSession session, String request) {
+        // A detached/background session cannot access the Android clipboard.
+        String id = "";
+        String metadata = request.split(";", 2)[0];
+        for (String field : metadata.split(":"))
+            if (field.startsWith("id=")) id = ":id=" + field.substring(3).replaceAll("[^a-zA-Z0-9_+.-]", "");
+        String type = metadata.startsWith("type=read") ? "read" : "write";
+        session.write("\033]5522;type=" + type + ":status=EPERM" + id + "\033\\");
+    }
+
     void onBell(@NonNull TerminalSession session);
 
     void onColorsChanged(@NonNull TerminalSession session);

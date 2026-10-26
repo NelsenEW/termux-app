@@ -36,6 +36,8 @@ import android.widget.Scroller;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.core.view.inputmethod.EditorInfoCompat;
+import androidx.core.view.inputmethod.InputConnectionCompat;
 
 import com.termux.terminal.KeyHandler;
 import com.termux.terminal.TerminalEmulator;
@@ -289,13 +291,11 @@ public final class TerminalView extends View {
      */
     public boolean attachSession(TerminalSession session) {
         if (session == mTermSession) return false;
+        mTopRow = 0;
 
         mTermSession = session;
         mEmulator = null;
         mCombiningAccent = 0;
-
-        // The emulator's cached value will be read in `updateSize()` when emulator is set.
-        setTopRow(0, false);
 
         updateSize();
 
@@ -340,7 +340,17 @@ public final class TerminalView extends View {
         // keyboard on Android TV (see https://github.com/termux/termux-app/issues/221).
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
 
-        return new BaseInputConnection(this, true) {
+        EditorInfoCompat.setContentMimeTypes(outAttrs, new String[]{"image/*"});
+        InputConnection textConnection = new BaseInputConnection(this, true) {
+
+            @Override
+            public boolean performContextMenuAction(int id) {
+                if (id == android.R.id.paste && mTermSession != null) {
+                    mTermSession.onPasteTextFromClipboard();
+                    return true;
+                }
+                return super.performContextMenuAction(id);
+            }
 
             @Override
             public boolean finishComposingText() {
@@ -435,6 +445,21 @@ public final class TerminalView extends View {
             }
 
         };
+        return InputConnectionCompat.createWrapper(textConnection, outAttrs, (content, flags, options) -> {
+            if (mTermSession == null || !content.getDescription().hasMimeType("image/*")) return false;
+            boolean granted = (flags & InputConnectionCompat.INPUT_CONTENT_GRANT_READ_URI_PERMISSION) != 0;
+            try {
+                if (granted) content.requestPermission();
+                return mClient.onPasteImage(mTermSession, content.getContentUri(),
+                    content.getDescription().getMimeType(0), () -> {
+                        if (granted) content.releasePermission();
+                    });
+            } catch (Exception error) {
+                if (granted) content.releasePermission();
+                mClient.logWarn(LOG_TAG, "Unable to accept keyboard image content");
+                return false;
+            }
+        });
     }
 
     @Override
@@ -460,9 +485,10 @@ public final class TerminalView extends View {
         if (mEmulator == null) return;
 
         int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
-        if (mTopRow < -rowsInHistory) setTopRow(-rowsInHistory);
+        if (mTopRow < -rowsInHistory) mTopRow = -rowsInHistory;
 
         if (isSelectingText() || mEmulator.isAutoScrollDisabled()) {
+
             // Do not scroll when selecting text.
             int rowShift = mEmulator.getScrollCounter();
             if (-mTopRow + rowShift > rowsInHistory) {
@@ -472,12 +498,12 @@ public final class TerminalView extends View {
                     stopTextSelectionMode();
 
                 if (mEmulator.isAutoScrollDisabled()) {
-                    setTopRow(-rowsInHistory);
+                    mTopRow = -rowsInHistory;
                     skipScrolling = true;
                 }
             } else {
                 skipScrolling = true;
-                setTopRow(mTopRow - rowShift);
+                mTopRow -= rowShift;
                 decrementYTextSelectionCursors(rowShift);
             }
         }
@@ -490,7 +516,7 @@ public final class TerminalView extends View {
                 // of one row at a time.
                 awakenScrollBars();
             }
-            setTopRow(0);
+            mTopRow = 0;
         }
 
         mEmulator.clearScrollCounter();
@@ -558,6 +584,10 @@ public final class TerminalView extends View {
         int[] columnAndRow = getColumnAndRow(e, false);
         int x = columnAndRow[0] + 1;
         int y = columnAndRow[1] + 1;
+        if (mEmulator.isPixelMouseEnabled()) {
+            x = (int) e.getX() + 1;
+            y = (int) (e.getY() - mRenderer.mFontLineSpacingAndAscent) + 1;
+        }
         if (pressed && (button == TerminalEmulator.MOUSE_WHEELDOWN_BUTTON || button == TerminalEmulator.MOUSE_WHEELUP_BUTTON)) {
             if (mMouseStartDownTime == e.getDownTime()) {
                 x = mMouseScrollStartX;
@@ -568,7 +598,8 @@ public final class TerminalView extends View {
                 mMouseScrollStartY = y;
             }
         }
-        mEmulator.sendMouseEvent(button, x, y, pressed);
+        if (mEmulator.isPixelMouseEnabled()) mEmulator.sendMouseEventPixels(button, x, y, pressed);
+        else mEmulator.sendMouseEvent(button, x, y, pressed);
     }
 
     /** Perform a scroll, either from dragging the screen or by scrolling a mouse wheel. */
@@ -583,15 +614,30 @@ public final class TerminalView extends View {
                 // e.g. less, which shifts to the alt screen without mouse handling.
                 handleKeyCode(up ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, 0);
             } else {
-                setTopRow(Math.min(0, Math.max(-(mEmulator.getScreen().getActiveTranscriptRows()), mTopRow + (up ? -1 : 1))));
+                mTopRow = Math.min(0, Math.max(-(mEmulator.getScreen().getActiveTranscriptRows()), mTopRow + (up ? -1 : 1)));
                 if (!awakenScrollBars()) invalidate();
             }
         }
     }
 
+    @Override
+    public boolean onHoverEvent(MotionEvent event) {
+        if (mEmulator != null && event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+            event.getAction() == MotionEvent.ACTION_HOVER_MOVE && mEmulator.isAnyMouseTrackingActive()) {
+            sendMouseEventCode(event, TerminalEmulator.MOUSE_MOVED, true);
+            return true;
+        }
+        return super.onHoverEvent(event);
+    }
+
     /** Overriding {@link View#onGenericMotionEvent(MotionEvent)}. */
     @Override
     public boolean onGenericMotionEvent(MotionEvent event) {
+        if (mEmulator != null && event.isFromSource(InputDevice.SOURCE_MOUSE) &&
+            event.getAction() == MotionEvent.ACTION_HOVER_MOVE && mEmulator.isAnyMouseTrackingActive()) {
+            sendMouseEventCode(event, TerminalEmulator.MOUSE_MOVED, true);
+            return true;
+        }
         if (mEmulator != null && event.isFromSource(InputDevice.SOURCE_MOUSE) && event.getAction() == MotionEvent.ACTION_SCROLL) {
             // Handle mouse wheel scrolling.
             boolean up = event.getAxisValue(MotionEvent.AXIS_VSCROLL) > 0.0f;
@@ -617,15 +663,7 @@ public final class TerminalView extends View {
                 if (action == MotionEvent.ACTION_DOWN) showContextMenu();
                 return true;
             } else if (event.isButtonPressed(MotionEvent.BUTTON_TERTIARY)) {
-                ClipboardManager clipboardManager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-                ClipData clipData = clipboardManager.getPrimaryClip();
-                if (clipData != null) {
-                    ClipData.Item clipItem = clipData.getItemAt(0);
-                    if (clipItem != null) {
-                        CharSequence text = clipItem.coerceToText(getContext());
-                        if (!TextUtils.isEmpty(text)) mEmulator.paste(text.toString());
-                    }
-                }
+                if (action == MotionEvent.ACTION_DOWN) mTermSession.onPasteTextFromClipboard();
             } else if (mEmulator.isMouseTrackingActive()) { // BUTTON_PRIMARY.
                 switch (event.getAction()) {
                     case MotionEvent.ACTION_DOWN:
@@ -1000,19 +1038,7 @@ public final class TerminalView extends View {
             if (mTerminalCursorBlinkerRunnable != null)
                 mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
 
-            // Restore cached top row value if session/emulator was switched back from a
-            // different session or after activity restart. The top row value also needs to be
-            // maintained after opening/closing soft keyboard.
-            int topRow = 0;
-            if (mEmulator != null) {
-                int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
-                int cachedTopRow = mEmulator.getTopRow();
-                if (cachedTopRow >= -rowsInHistory) {
-                    topRow = cachedTopRow;
-                }
-            }
-            setTopRow(topRow);
-
+            mTopRow = 0;
             scrollTo(0, 0);
             invalidate();
         }
@@ -1067,15 +1093,8 @@ public final class TerminalView extends View {
         return mTopRow;
     }
 
-    public void setTopRow(int topRow) {
-        setTopRow(topRow, true);
-    }
-
-    public void setTopRow(int topRow, boolean updateEmulator) {
-        mTopRow = topRow;
-        if (updateEmulator && mEmulator != null) {
-            mEmulator.setTopRow(mTopRow);
-        }
+    public void setTopRow(int mTopRow) {
+        this.mTopRow = mTopRow;
     }
 
 
@@ -1351,7 +1370,7 @@ public final class TerminalView extends View {
                     mCursorVisible = !mCursorVisible;
                     //mClient.logVerbose(LOG_TAG, "Toggling cursor blink state to " + mCursorVisible);
                     mEmulator.setCursorBlinkState(mCursorVisible);
-                    invalidate();
+                    if (!mEmulator.isSynchronizedOutputActive()) invalidate();
                 }
             } finally {
                 // Recall the Runnable after mBlinkRate milliseconds to toggle the blink state

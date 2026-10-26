@@ -50,7 +50,9 @@ import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A service holding a list of {@link TermuxSession} in {@link TermuxShellManager#mTermuxSessions} and background {@link AppShell}
@@ -104,6 +106,9 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
     /** If the user has executed the {@link TERMUX_SERVICE#ACTION_STOP_SERVICE} intent. */
     boolean mWantsToStop = false;
+
+    /** Explicit closes survive activity recreation until the process exits. */
+    private final Set<String> mSessionsPendingClose = new HashSet<>();
 
     private static final String LOG_TAG = "TermuxService";
 
@@ -625,6 +630,18 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         return newTermuxSession;
     }
 
+    /** Request closure of one local session; its exit callback completes removal. */
+    public synchronized boolean requestCloseTermuxSession(TerminalSession session) {
+        if (session == null || getIndexOfSession(session) < 0) return false;
+        mSessionsPendingClose.add(session.mHandle);
+        session.finishIfRunning();
+        return true;
+    }
+
+    public synchronized boolean isTermuxSessionCloseRequested(TerminalSession session) {
+        return mSessionsPendingClose.contains(session.mHandle);
+    }
+
     /** Remove a TermuxSession. */
     public synchronized int removeTermuxSession(TerminalSession sessionToRemove) {
         int index = getIndexOfSession(sessionToRemove);
@@ -648,6 +665,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
                 TermuxPluginUtils.processPluginExecutionCommandResult(this, LOG_TAG, executionCommand);
 
             mShellManager.mTermuxSessions.remove(termuxSession);
+            mSessionsPendingClose.remove(termuxSession.getTerminalSession().mHandle);
 
             // Notify {@link TermuxSessionsListViewController} that sessions list has been updated if
             // activity in is foreground
