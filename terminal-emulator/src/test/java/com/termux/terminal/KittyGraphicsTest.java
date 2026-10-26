@@ -664,13 +664,13 @@ public class KittyGraphicsTest extends TerminalTestCase {
     public void testPutForUnknownImageIdRespondsError() {
         withTerminalSized(20, 4);
         assertEnteringStringGivesResponse("\033_Ga=p,i=201,p=1,c=4,r=2,C=1\033\\",
-            "\033_Gi=201;ENOENT:no image transmitted for image id\033\\");
+            "\033_Gi=201;ENOENT: image not found\033\\");
 
         // The image data is freed by a `d=I` delete, after which it cannot be displayed again.
         enterString("\033_Ga=t,f=100,t=d,i=201,m=0,q=2;" + PNG_BASE64 + "\033\\");
         enterString("\033_Ga=d,d=I,i=201,q=2\033\\");
         assertEnteringStringGivesResponse("\033_Ga=p,i=201,p=1,C=1\033\\",
-            "\033_Gi=201;ENOENT:no image transmitted for image id\033\\");
+            "\033_Gi=201;ENOENT: image not found\033\\");
     }
 
     public void testPutWithoutImageIdIsIgnored() {
@@ -1310,6 +1310,28 @@ public class KittyGraphicsTest extends TerminalTestCase {
         // `ESC c` - full reset (RIS).
         enterString("\033c");
         assertEquals(-1, mTerminal.getKittyImageDataLength(23));
+    }
+
+
+    public void testRepeatedFrameActionContinuationKeepsFirstGeometryAndQuietLevel() {
+        withTerminalSized(5, 5);
+        enterString("\033_Ga=t,f=32,s=2,v=2,i=77,q=2;" + RGBA_BASE64_2X2 + "\033\\");
+        byte[] before = mTerminal.copyKittyImageData(77);
+        enterString("\033_Ga=f,f=32,i=77,r=1,X=1,x=1,y=0,s=1,v=1,q=1,m=1;AQID\033\\");
+        assertTrue(Arrays.equals(before, mTerminal.copyKittyImageData(77)));
+        assertEnteringStringGivesResponse("\033_Ga=f,i=77,q=1,m=0;BA==\033\\", "");
+        byte[] expected = before.clone();
+        System.arraycopy(new byte[] {1, 2, 3, 4}, 0, expected, 4, 4);
+        assertTrue(Arrays.equals(expected, mTerminal.copyKittyImageData(77)));
+    }
+
+    public void testJpegFormatRequiresValidImageDataBeforeAdvertisingSupport() {
+        withTerminalSized(5, 5);
+        assertEnteringStringGivesResponse("\033_Ga=q,f=101,i=88,s=1,v=1;AAAA\033\\",
+            "\033_Gi=88;EBADDATA:invalid JPEG image data\033\\");
+        assertEquals(-1, mTerminal.getKittyImageDataLength(88));
+        assertEnteringStringGivesResponse("\033_Ga=f,f=32,i=89,r=1,s=1,v=1,q=1;AAAAAA==\033\\",
+            "\033_Gi=89;ENOENT: image not found\033\\");
     }
 
 }

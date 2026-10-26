@@ -1059,6 +1059,7 @@ public final class TerminalView extends View {
 
             // render the text selection handles
             renderTextSelection();
+            if (mTermSession != null) mTermSession.onScreenDrawn();
         }
     }
 

@@ -1,5 +1,8 @@
 package com.termux.terminal;
 
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+
 import java.util.Arrays;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
@@ -119,6 +122,7 @@ public class KittyImage {
     public static final int FORMAT__RGBA = 32;
     /** `f=100` - `PNG` image data. */
     public static final int FORMAT__PNG = 100;
+    public static final int FORMAT__JPEG = 101;
 
     /** The default image format if the `f` key is not passed as per the protocol. */
     public static final int FORMAT__DEFAULT = FORMAT__RGBA;
@@ -665,8 +669,8 @@ public class KittyImage {
                 mUnicodePlaceholder = argValue.equals("1");
                 break;
             case 'f': { // The image format.
-                long value = readNumberArg(argValue, 0, FORMAT__PNG);
-                if (value != FORMAT__RGB && value != FORMAT__RGBA && value != FORMAT__PNG) {
+                long value = readNumberArg(argValue, 0, FORMAT__JPEG);
+                if (value != FORMAT__RGB && value != FORMAT__RGBA && value != FORMAT__PNG && value != FORMAT__JPEG) {
                     return setStateFailed(ERROR__EINVAL, "invalid image format");
                 }
                 mFormat = (int) value;
@@ -968,6 +972,7 @@ public class KittyImage {
         }
 
         if (mCompressed && !inflateImage()) return false;
+        if (mFormat == FORMAT__JPEG && !decodeJpeg()) return false;
 
         // The pixel dimensions of raw image data are not part of the data itself, so they must be
         // passed with the `s` and `v` keys and must match the length of the data exactly.
@@ -1044,6 +1049,61 @@ public class KittyImage {
             return setStateFailed(ERROR__ENOSPC, "not enough memory to inflate image");
         } finally {
             inflater.end();
+        }
+    }
+
+    private boolean decodeJpeg() {
+        if (mImageDataLength < 4 || (mImageData[0] & 255) != 255 || (mImageData[1] & 255) != 216 ||
+            (mImageData[mImageDataLength - 2] & 255) != 255 || (mImageData[mImageDataLength - 1] & 255) != 217) {
+            return setStateFailed(ERROR__EBADDATA, "invalid JPEG image data");
+        }
+        Bitmap bitmap = null;
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            options.inScaled = false;
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            BitmapFactory.decodeByteArray(mImageData, 0, mImageDataLength, options);
+            int width = options.outWidth, height = options.outHeight;
+            if (!"image/jpeg".equals(options.outMimeType) || width < 1 || height < 1 ||
+                width > PIXEL_DIMENSION__MAX || height > PIXEL_DIMENSION__MAX) {
+                return setStateFailed(ERROR__EBADDATA, "invalid JPEG image dimensions");
+            }
+            long length = (long) width * height * 4;
+            if ((long) mImageData.length + length * 2 + (long) width * 4 > IMAGE_DATA__MAX_LENGTH) {
+                return setStateFailed(ERROR__ENOSPC, "decoded JPEG exceeds image memory limit");
+            }
+            byte[] rgba = new byte[(int) length];
+            int[] row = new int[width];
+            options.inJustDecodeBounds = false;
+            bitmap = BitmapFactory.decodeByteArray(mImageData, 0, mImageDataLength, options);
+            if (bitmap == null || bitmap.getWidth() != width || bitmap.getHeight() != height ||
+                bitmap.getAllocationByteCount() > length) {
+                return setStateFailed(ERROR__EBADDATA, "decoding JPEG image failed");
+            }
+            for (int y = 0, offset = 0; y < height; y++) {
+                bitmap.getPixels(row, 0, width, 0, y, width, 1);
+                for (int color : row) {
+                    rgba[offset++] = (byte) (color >>> 16);
+                    rgba[offset++] = (byte) (color >>> 8);
+                    rgba[offset++] = (byte) color;
+                    rgba[offset++] = (byte) 255;
+                }
+            }
+            mImageData = rgba;
+            mImageDataLength = rgba.length;
+            mImageDataExpectedLength = rgba.length;
+            mPixelWidth = width;
+            mPixelHeight = height;
+            mFormat = FORMAT__RGBA;
+            mCompressed = false;
+            return true;
+        } catch (OutOfMemoryError error) {
+            return setStateFailed(ERROR__ENOSPC, "not enough memory to decode JPEG");
+        } catch (RuntimeException error) {
+            return setStateFailed(ERROR__EBADDATA, "decoding JPEG image failed");
+        } finally {
+            if (bitmap != null) bitmap.recycle();
         }
     }
 

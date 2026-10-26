@@ -223,6 +223,10 @@ public final class TerminalSession extends TerminalOutput {
         return mEmulator;
     }
 
+    private boolean mSynchronizedFrameCompleted;
+    private boolean mWaitingForFrameDraw;
+    private final Runnable mFrameDrawTimeout = this::resumeInputAfterFrame;
+
     private final Runnable mSynchronizedOutputTimeout = () -> {
         if (mEmulator != null && mEmulator.isSynchronizedOutputActive()) {
             mEmulator.doDecSetOrReset(false, 2026);
@@ -233,7 +237,22 @@ public final class TerminalSession extends TerminalOutput {
     @Override
     public void onSynchronizedOutputChanged(boolean enabled) {
         mMainThreadHandler.removeCallbacks(mSynchronizedOutputTimeout);
-        if (enabled) mMainThreadHandler.postDelayed(mSynchronizedOutputTimeout, 1000);
+        if (enabled) {
+            mMainThreadHandler.postDelayed(mSynchronizedOutputTimeout, 1000);
+        } else {
+            mSynchronizedFrameCompleted = true;
+        }
+    }
+
+    public void onScreenDrawn() {
+        resumeInputAfterFrame();
+    }
+
+    private void resumeInputAfterFrame() {
+        if (!mWaitingForFrameDraw) return;
+        mWaitingForFrameDraw = false;
+        mMainThreadHandler.removeCallbacks(mFrameDrawTimeout);
+        mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT);
     }
 
     /** Notify the {@link #mClient} that the screen has changed. */
@@ -392,16 +411,20 @@ public final class TerminalSession extends TerminalOutput {
     class MainThreadHandler extends Handler {
 
         final byte[] mReceiveBuffer = new byte[64 * 1024];
+        int mReceiveOffset;
+        int mReceiveLength;
 
         @Override
         public void handleMessage(Message msg) {
-            int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
-            if (bytesRead > 0) {
-                mEmulator.append(mReceiveBuffer, bytesRead);
-                notifyScreenUpdate();
-            }
-
             if (msg.what == MSG_PROCESS_EXITED) {
+                mWaitingForFrameDraw = false;
+                removeCallbacks(mFrameDrawTimeout);
+                while (mReceiveOffset < mReceiveLength) {
+                    mReceiveOffset += mEmulator.appendUntilFrame(
+                        mReceiveBuffer, mReceiveOffset, mReceiveLength - mReceiveOffset);
+                }
+                int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
+                if (bytesRead > 0) mEmulator.append(mReceiveBuffer, bytesRead);
                 int exitCode = (Integer) msg.obj;
                 cleanupResources(exitCode);
                 mEmulator.doDecSetOrReset(false, 2026);
@@ -421,7 +444,30 @@ public final class TerminalSession extends TerminalOutput {
                 notifyScreenUpdate();
 
                 mClient.onSessionFinished(TerminalSession.this);
+                return;
             }
+
+            if (mWaitingForFrameDraw || mEmulator == null) return;
+            removeMessages(MSG_NEW_INPUT);
+            if (mReceiveOffset == mReceiveLength) {
+                mReceiveOffset = 0;
+                mReceiveLength = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
+            }
+            if (mReceiveLength <= 0) {
+                mReceiveLength = 0;
+                return;
+            }
+
+            mSynchronizedFrameCompleted = false;
+            mReceiveOffset += mEmulator.appendUntilFrame(
+                mReceiveBuffer, mReceiveOffset, mReceiveLength - mReceiveOffset);
+            if (mSynchronizedFrameCompleted) {
+                mWaitingForFrameDraw = true;
+                postDelayed(mFrameDrawTimeout, 250);
+            } else {
+                sendEmptyMessage(MSG_NEW_INPUT);
+            }
+            notifyScreenUpdate();
         }
 
     }

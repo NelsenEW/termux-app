@@ -846,6 +846,18 @@ public final class TerminalEmulator {
             processByte(buffer[i]);
     }
 
+    public int appendUntilFrame(byte[] buffer, int offset, int length) {
+        if (offset < 0 || length < 0 || offset > buffer.length - length) {
+            throw new IndexOutOfBoundsException();
+        }
+        for (int consumed = 0; consumed < length; consumed++) {
+            boolean wasSynchronized = isSynchronizedOutputActive();
+            processByte(buffer[offset + consumed]);
+            if (wasSynchronized && !isSynchronizedOutputActive()) return consumed + 1;
+        }
+        return length;
+    }
+
     private void processByte(byte byteToProcess) {
         if (mUtf8ToFollow > 0) {
             if ((byteToProcess & 0b11000000) == 0b10000000) {
@@ -2922,11 +2934,14 @@ public final class TerminalEmulator {
             return kittyImage;
         }
 
-        // As per the protocol, a continuation chunk of an image being received with multiple
-        // commands only passes the `m` and `q` keys, so a command that passes the `a` key is always
-        // a new command, even if the previous image was not received completely.
         if (mKittyImage != null) {
-            if (kittyImage.hasAction()) {
+            boolean repeatedTransmission = kittyImage.hasAction() &&
+                kittyImage.getAction() == mKittyImage.getAction() &&
+                (kittyImage.getAction() == KittyImage.ACTION__FRAME ||
+                    kittyImage.getAction() == KittyImage.ACTION__TRANSMIT ||
+                    kittyImage.getAction() == KittyImage.ACTION__TRANSMIT_AND_DISPLAY) &&
+                kittyImage.getImageId() == mKittyImage.getImageId();
+            if (kittyImage.hasAction() && !repeatedTransmission) {
                 Logger.logWarn(mClient, LOG_TAG, "A new kitty graphics command received while an image was still being received");
                 mKittyImage = null;
             } else {
@@ -3104,11 +3119,7 @@ public final class TerminalEmulator {
         }
         KittyStoredImage image = mKittyImages.get(command.getImageId());
         if (image == null) {
-            command.setStateFailed(KittyImage.ERROR__ENOENT, "no image transmitted for image id");
-            return;
-        }
-        if (!command.isRawFormat() || (image.mFormat != KittyImage.FORMAT__RGB && image.mFormat != KittyImage.FORMAT__RGBA)) {
-            command.setStateFailed(KittyImage.ERROR__ENOTSUP, "frame edits require raw RGB or RGBA images");
+            command.setStateFailed(KittyImage.ERROR__ENOENT, " image not found");
             return;
         }
         if (command.getFrameComposition() > 1) {
@@ -3116,6 +3127,10 @@ public final class TerminalEmulator {
             return;
         }
         if (!command.finishImage()) return;
+        if (!command.isRawFormat() || (image.mFormat != KittyImage.FORMAT__RGB && image.mFormat != KittyImage.FORMAT__RGBA)) {
+            command.setStateFailed(KittyImage.ERROR__ENOTSUP, "frame edits require raw RGB or RGBA images");
+            return;
+        }
         int x = command.getSourceX(), y = command.getSourceY();
         int w = command.getPixelWidth(), h = command.getPixelHeight();
         if ((long) x + w > image.mPixelWidth || (long) y + h > image.mPixelHeight) {
@@ -3165,7 +3180,7 @@ public final class TerminalEmulator {
 
         KittyStoredImage storedImage = mKittyImages.get(imageId);
         if (storedImage == null) {
-            kittyImage.setStateFailed(KittyImage.ERROR__ENOENT, "no image transmitted for image id");
+            kittyImage.setStateFailed(KittyImage.ERROR__ENOENT, " image not found");
             return;
         }
 
