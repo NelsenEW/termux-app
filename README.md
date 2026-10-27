@@ -1,3 +1,52 @@
+# NelsenEW / Termux Kitty
+
+Our standalone Android Termux port, forked from [termux/termux-app](https://github.com/termux/termux-app).
+
+The initial import is **Kitty Standalone v141**, package `com.termyx`, for
+`arm64-v8a`. It includes Kitty graphics and root-frame updates, JPEG support,
+pixel mouse handling, synchronized screen updates, clipboard and keyboard
+shortcuts, Pano integration, and the v141 background SSH session fix.
+See [the v141 notes](KITTY-141.txt) for that fix and its validation limits.
+
+Development happens on the default `kitty` branch, preserving the existing
+v139 and v140 commits and upstream Git history. `master` retains the upstream
+branch. The `kitty-v141` tag marks the v141 port update. Upstream documentation
+and licenses are retained below and in the modules.
+
+## Building this port
+
+The verified v141 build used Java 17, Android SDK 36, NDK `27.1.12297006`, and
+Gradle 9.0.0. The inherited wrapper targets Gradle 9.2.1; it was not used for
+the recorded v141 build. With the verified toolchain installed, run:
+
+```sh
+export ANDROID_HOME=/path/to/android-sdk
+export JITPACK_NDK_VERSION=27.1.12297006
+export TERMUX_APP_VERSION_NAME=0.118.0+kitty.standalone.141
+export TERMUX_APK_VERSION_TAG=kitty-standalone-141
+export TERMUX_SPLIT_APKS_FOR_DEBUG_BUILDS=1
+export TERMUX_CUSTOM_KEYSTORE=/path/outside/repo/termux-kitty.jks
+export TERMUX_CUSTOM_KEY_PASSWORD_FILE=/path/outside/repo/signing-password
+/path/to/gradle-9.0.0/bin/gradle --no-daemon --max-workers=2 \
+  :terminal-emulator:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug
+```
+
+Both `app/src/main/cpp/bootstrap-aarch64.zip` and
+`app/src/main/assets/compat-runtime.zip` are required source assets and are
+tracked. The bootstrap targets this port's package; the stock Termux bootstrap
+is not a replacement. APKs appear in `app/build/outputs/apk/debug/`.
+Signing keys and passwords stay outside Git. Updating an existing installation
+requires its original signing key. The upstream test keystore remains available for disposable builds; it cannot
+produce updates compatible with our existing installation.
+
+The existing v141 build receipt records **235 emulator tests and 20 app tests
+passing**, a successful signed APK build, and matching source hashes. These
+results predate this Git update. Phone keyboard acceptance was still
+pending in that receipt. The inherited upstream GitHub workflows have not been
+adapted to this port's toolchain, single ABI, or private signing process.
+
+## Upstream documentation
+
 # Termux application
 
 [![Build status](https://github.com/termux/termux-app/workflows/Build/badge.svg)](https://github.com/termux/termux-app/actions)

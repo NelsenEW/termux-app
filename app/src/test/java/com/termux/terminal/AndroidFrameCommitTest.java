@@ -30,11 +30,13 @@ import static org.junit.Assert.*;
 public class AndroidFrameCommitTest {
     private TerminalSession session;
     private int updates;
+    private boolean screenVisible = true;
 
     @Before public void setup() {
         TerminalSessionClient client = (TerminalSessionClient) Proxy.newProxyInstance(
             TerminalSessionClient.class.getClassLoader(),
             new Class<?>[]{TerminalSessionClient.class}, (proxy, method, args) -> {
+                if (method.getName().equals("isTerminalScreenVisible")) return screenVisible;
                 if (method.getName().equals("onTextChanged")) updates++;
                 if (method.getReturnType() == boolean.class) return false;
                 if (method.getReturnType() == int.class) return 0;
@@ -101,11 +103,32 @@ public class AndroidFrameCommitTest {
         assertEquals(3, updates);
     }
 
-    @Test public void aHiddenSessionContinuesAfterTheBoundedDrawTimeout() {
+    @Test public void aVisibleSessionContinuesAfterTheBoundedDrawTimeout() {
         receive(frame("FIRST") + frame("SECOND"));
         Shadows.shadowOf(Looper.getMainLooper()).idleFor(249, TimeUnit.MILLISECONDS);
         assertEquals("FIRST", screen());
         Shadows.shadowOf(Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS);
+        assertEquals("SECOND", screen());
+        assertEquals(2, updates);
+    }
+
+    @Test public void aHiddenSessionDrainsBurstsWithoutWaitingForDrawTimeouts() {
+        screenVisible = false;
+        StringBuilder burst = new StringBuilder();
+        for (int i = 0; i < 512; i++) burst.append(frame("FRAME" + i));
+        receive(burst.toString());
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertEquals("FRAME511", screen());
+        assertEquals(512, updates);
+        assertEquals(0, session.mProcessToTerminalIOQueue.read(new byte[1], false));
+    }
+
+    @Test public void detachingAVisibleClientReleasesItsPendingFrameImmediately() {
+        receive(frame("FIRST") + frame("SECOND"));
+        assertEquals("FIRST", screen());
+        screenVisible = false;
+        session.updateTerminalSessionClient(session.mClient);
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertEquals("SECOND", screen());
         assertEquals(2, updates);
     }

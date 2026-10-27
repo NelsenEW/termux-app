@@ -1,0 +1,27 @@
+TERMUX KITTY STANDALONE v141 — SSH background input/display lag fix
+
+Cause:
+v140 paused output after every DEC 2026 synchronized frame until the terminal
+view drew it, with a 250 ms fallback. Background tabs cannot draw. Codex and
+tmux produce synchronized text frames, so hidden sessions were capped at four
+frames per second, filled their 64 KiB output queues, and blocked SSH output.
+Keyboard responses then appeared stuck behind old screen updates.
+
+Fix:
+Only the current visible terminal waits for a draw acknowledgement. Hidden
+sessions drain normally. Detaching a visible session client releases a pending
+frame immediately. Visible graphics frame pacing and the recovery timeout stay
+available. This includes v140 JPEG and frame-update changes.
+
+Validation:
+A 512-frame hidden-session burst regression is run with the old frame wait
+(expected failure) and the fix (expected pass). Emulator and Android graphics
+and session tests, APK assembly, package/version/ABI and signing checks are run.
+See artifact-receipt.json for actual results.
+
+Install:
+Save any local terminal work, open Termux-Kitty-Standalone-141.apk in My Files,
+and choose Update. Do not uninstall. Updating replaces com.termyx and stops its
+local sessions, including SSH clients. Remote tmux work remains on the PCs;
+reopen the app and reconnect. Phone keyboard acceptance remains to be checked
+after installing. No remote tmux settings were changed for this fix.

@@ -37,3 +37,9 @@ local.properties
 .swp
 ehthumbs.db
 Thumbs.db
+
+!app/src/main/cpp/bootstrap-aarch64.zip
+!app/src/main/assets/compat-runtime.zip
+*.jks
+*.keystore
+signing-password

@@ -100,6 +100,8 @@ public final class TerminalSession extends TerminalOutput {
 
         if (mEmulator != null)
             mEmulator.updateTerminalSessionClient(client);
+
+        if (!client.isTerminalScreenVisible(this)) resumeInputAfterFrame();
     }
 
     /** Inform the attached pty of the new size and reflow or initialize the emulator. */
@@ -461,7 +463,10 @@ public final class TerminalSession extends TerminalOutput {
             mSynchronizedFrameCompleted = false;
             mReceiveOffset += mEmulator.appendUntilFrame(
                 mReceiveBuffer, mReceiveOffset, mReceiveLength - mReceiveOffset);
-            if (mSynchronizedFrameCompleted) {
+            // Hidden tabs cannot acknowledge draws. Waiting for the 250 ms fallback
+            // on every text frame limits them to four frames per second, fills the
+            // PTY queue, and makes SSH input appear frozen behind stale output.
+            if (mSynchronizedFrameCompleted && mClient.isTerminalScreenVisible(TerminalSession.this)) {
                 mWaitingForFrameDraw = true;
                 postDelayed(mFrameDrawTimeout, 250);
             } else {

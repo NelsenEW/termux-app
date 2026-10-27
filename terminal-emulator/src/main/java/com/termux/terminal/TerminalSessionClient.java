@@ -10,6 +10,11 @@ import androidx.annotation.Nullable;
  */
 public interface TerminalSessionClient {
 
+    /** Whether this session has a visible view that can acknowledge a drawn frame. */
+    default boolean isTerminalScreenVisible(@NonNull TerminalSession session) {
+        return false;
+    }
+
     void onTextChanged(@NonNull TerminalSession changedSession);
 
     void onTitleChanged(@NonNull TerminalSession changedSession);

@@ -118,6 +118,12 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
 
 
     @Override
+    public boolean isTerminalScreenVisible(@NonNull TerminalSession session) {
+        return mActivity.isVisible() && mActivity.getCurrentSession() == session
+            && mActivity.getTerminalView().isShown();
+    }
+
+    @Override
     public void onTextChanged(@NonNull TerminalSession changedSession) {
         if (!mActivity.isVisible()) return;
 
